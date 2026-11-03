@@ -8,7 +8,7 @@ use dango_core::settings::Settings;
 use dango_core::store::Progress;
 use dango_core::{Dango, Paths};
 use serde_json::{json, Value};
-use tauri::{Emitter, Manager, State};
+use tauri::{Emitter, Manager, RunEvent, State, WindowEvent};
 
 type Res<T> = Result<T, String>;
 
@@ -205,6 +205,8 @@ async fn sweep_cache(d: State<'_, Arc<Dango>>) -> Res<Value> {
 fn install_crash_log() {
     let Ok(paths) = Paths::resolve() else { return };
     let log = paths.data.join("crash.log");
+    #[cfg(windows)]
+    native_crash::install(log.clone());
     let default = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let bt = std::backtrace::Backtrace::force_capture();
@@ -281,6 +283,67 @@ fn main() {
             clear_cache,
             sweep_cache,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running dango");
+        .build(tauri::generate_context!())
+        .expect("error while building dango")
+        .run(|_, event| match event {
+            // Record how the app ends: a missing "exiting" line after the window vanished
+            // means the process was killed or crashed natively.
+            RunEvent::WindowEvent { label, event: WindowEvent::CloseRequested { .. }, .. } => {
+                tracing::info!("window {label}: close requested")
+            }
+            RunEvent::WindowEvent { label, event: WindowEvent::Destroyed, .. } => {
+                tracing::info!("window {label}: destroyed")
+            }
+            RunEvent::ExitRequested { code, .. } => tracing::info!("exit requested (code {code:?})"),
+            RunEvent::Exit => tracing::info!("exiting"),
+            _ => {}
+        });
+}
+
+/// Native crashes (access violations and the like) skip the panic hook. Log the exception code
+/// before Windows ends the process.
+#[cfg(windows)]
+mod native_crash {
+    use std::ffi::c_void;
+    use std::io::Write;
+    use std::sync::OnceLock;
+
+    static LOG: OnceLock<std::path::PathBuf> = OnceLock::new();
+
+    #[repr(C)]
+    struct ExceptionRecord {
+        code: u32,
+        flags: u32,
+        next: *mut ExceptionRecord,
+        address: *mut c_void,
+    }
+
+    #[repr(C)]
+    struct ExceptionPointers {
+        record: *mut ExceptionRecord,
+        context: *mut c_void,
+    }
+
+    type Filter = unsafe extern "system" fn(*mut ExceptionPointers) -> i32;
+
+    extern "system" {
+        fn SetUnhandledExceptionFilter(filter: Option<Filter>) -> Option<Filter>;
+    }
+
+    unsafe extern "system" fn filter(info: *mut ExceptionPointers) -> i32 {
+        let rec = unsafe { info.as_ref().and_then(|i| i.record.as_ref()) };
+        let (code, addr) = rec.map(|r| (r.code, r.address)).unwrap_or((0, std::ptr::null_mut()));
+        if let Some(path) = LOG.get() {
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+                let _ =
+                    writeln!(f, "--- dango {} native crash: exception 0x{code:08X} at {addr:p}", dango_core::VERSION);
+            }
+        }
+        0 // EXCEPTION_CONTINUE_SEARCH: let Windows end the process as usual.
+    }
+
+    pub fn install(log: std::path::PathBuf) {
+        let _ = LOG.set(log);
+        unsafe { SetUnhandledExceptionFilter(Some(filter)) };
+    }
 }

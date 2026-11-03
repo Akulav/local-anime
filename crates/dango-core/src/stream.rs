@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::io::SeekFrom;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -137,6 +137,8 @@ struct HlsJob {
     claimed: Vec<AtomicBool>,
     playhead: AtomicUsize,
     bytes: AtomicU64,
+    /// Consecutive segment failures, for backoff.
+    fails: AtomicU32,
     cancelled: AtomicBool,
     last_play: Mutex<Option<Instant>>,
     wake: Notify,
@@ -777,6 +779,7 @@ impl StreamInner {
             segs,
             playhead: AtomicUsize::new(0),
             bytes: AtomicU64::new(0),
+            fails: AtomicU32::new(0),
             cancelled: AtomicBool::new(false),
             last_play: Mutex::new(None),
             wake: Notify::new(),
@@ -851,11 +854,17 @@ impl StreamInner {
                 Ok((_, size)) => {
                     job.done[i].store(true, Ordering::Relaxed);
                     job.bytes.fetch_add(size, Ordering::Relaxed);
+                    job.fails.store(0, Ordering::Relaxed);
                 }
                 Err(e) => {
-                    tracing::debug!("prefetch segment {i} failed: {e}");
+                    // Back off while the host keeps failing, much more when it rate-limits us:
+                    // retrying every 2 s from every worker only prolongs a 429.
+                    let n = job.fails.fetch_add(1, Ordering::Relaxed) as u64 + 1;
+                    let base = if e.contains("HTTP 429") { 10 } else { 2 };
+                    let wait = (base * n).min(60);
+                    tracing::debug!("prefetch segment {i} failed ({n} in a row, retry in {wait}s): {e}");
                     job.claimed[i].store(false, Ordering::Relaxed);
-                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    tokio::time::sleep(Duration::from_secs(wait)).await;
                 }
             }
         }
