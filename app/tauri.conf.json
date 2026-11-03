@@ -1,0 +1,41 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "dango",
+  "identifier": "dev.dango.desktop",
+  "build": {
+    "frontendDist": "ui"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "title": "dango",
+        "width": 1360,
+        "height": 860,
+        "minWidth": 960,
+        "minHeight": 600,
+        "center": true,
+        "backgroundColor": "#0b0b10",
+        "theme": "Dark",
+        "dragDropEnabled": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' data: blob: http://127.0.0.1:* https:; media-src 'self' blob: http://127.0.0.1:*; connect-src 'self' ipc: http://ipc.localhost http://127.0.0.1:*; style-src 'self' 'unsafe-inline'; script-src 'self'; worker-src 'self' blob:; frame-src https: http:"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis", "appimage", "deb"],
+    "category": "Video",
+    "shortDescription": "Fast desktop anime player",
+    "longDescription": "dango finds working anime sources automatically, streams through a local disk cache and plays everything in a native window.",
+    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.png", "icons/icon.ico"],
+    "linux": {
+      "deb": { "depends": ["libwebkit2gtk-4.1-0", "libgtk-3-0"] }
+    },
+    "windows": {
+      "webviewInstallMode": { "type": "downloadBootstrapper" }
+    }
+  }
+}

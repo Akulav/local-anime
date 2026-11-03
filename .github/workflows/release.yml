@@ -1,0 +1,194 @@
+name: Release
+
+# Every push to main is tested, built for Windows and Linux, versioned and published as a
+# GitHub release. The version bump is patch by default; put "#minor" or "#major" in the
+# commit message (or pick one when running manually) for bigger bumps, "[skip release]"
+# to skip publishing.
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ["**.md", "LICENSE", ".editorconfig", ".gitattributes"]
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Version bump
+        type: choice
+        options: [patch, minor, major]
+        default: patch
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  version:
+    if: ${{ !contains(github.event.head_commit.message, '[skip release]') }}
+    runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.next.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - id: next
+        name: Compute next version
+        shell: bash
+        env:
+          INPUT_BUMP: ${{ github.event.inputs.bump }}
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+        run: |
+          current=$(grep -m1 -E '^version = "' Cargo.toml | sed -E 's/version = "(.*)"/\1/')
+          latest=$(git tag --list 'v*' --sort=-v:refname | head -n1 | sed 's/^v//')
+          # Start from whichever is newer: the last tag or the version in Cargo.toml.
+          base=$(printf '%s\n%s\n' "${latest:-0.0.0}" "$current" | sort -V | tail -n1)
+          bump="${INPUT_BUMP:-patch}"
+          case "$COMMIT_MSG" in *"#major"*) bump=major ;; *"#minor"*) bump=minor ;; esac
+          IFS=. read -r major minor patch <<< "$base"
+          if [ -z "$latest" ]; then
+            next="$current"   # first release ships the version already in Cargo.toml
+          else
+            case "$bump" in
+              major) next="$((major + 1)).0.0" ;;
+              minor) next="$major.$((minor + 1)).0" ;;
+              *)     next="$major.$minor.$((patch + 1))" ;;
+            esac
+          fi
+          echo "version=$next" >> "$GITHUB_OUTPUT"
+          echo "Releasing v$next (base $base, bump $bump)"
+
+  test:
+    needs: version
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    needs: [version, test]
+    name: build (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-x64
+            os: windows-latest
+          - name: linux-x86_64
+            os: ubuntu-22.04
+    runs-on: ${{ matrix.os }}
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set version
+        shell: bash
+        run: sed -i -E "0,/^version = \".*\"/s//version = \"$VERSION\"/" Cargo.toml
+
+      - name: Linux system libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev patchelf file
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Build and bundle
+        working-directory: app
+        shell: bash
+        run: npx --yes @tauri-apps/cli@2 build --bundles $([ "$RUNNER_OS" = Windows ] && echo nsis || echo appimage,deb)
+
+      - name: Collect artifacts
+        shell: bash
+        run: |
+          mkdir -p dist
+          b=target/release/bundle
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            cp target/release/dango.exe "dist/dango-v$VERSION-windows-x64-portable.exe"
+            cp $b/nsis/*.exe "dist/dango-v$VERSION-windows-x64-setup.exe"
+          else
+            tar -C target/release -czf "dist/dango-v$VERSION-linux-x86_64.tar.gz" dango
+            cp $b/appimage/*.AppImage "dist/dango-v$VERSION-linux-x86_64.AppImage"
+            cp $b/deb/*.deb "dist/dango-v$VERSION-linux-amd64.deb"
+          fi
+          ls -la dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dango-${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    needs: [version, build]
+    runs-on: ubuntu-22.04
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Commit version bump and tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          sed -i -E "0,/^version = \".*\"/s//version = \"$VERSION\"/" Cargo.toml
+          cargo update --workspace --offline || cargo update --workspace
+          if ! git diff --quiet; then
+            git commit -am "chore: release v$VERSION [skip ci]"
+          fi
+          git tag "v$VERSION"
+          git pull --rebase origin main
+          git push origin HEAD:main
+          git push origin "v$VERSION"
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Release notes
+        run: |
+          prev=$(git tag --list 'v*' --sort=-v:refname | sed -n 2p)
+          {
+            echo "## dango v$VERSION"
+            echo
+            echo "| Platform | Download |"
+            echo "| --- | --- |"
+            echo "| Windows (installer) | \`dango-v$VERSION-windows-x64-setup.exe\` |"
+            echo "| Windows (portable) | \`dango-v$VERSION-windows-x64-portable.exe\` |"
+            echo "| Linux AppImage | \`dango-v$VERSION-linux-x86_64.AppImage\` |"
+            echo "| Debian/Ubuntu | \`dango-v$VERSION-linux-amd64.deb\` |"
+            echo "| Linux binary | \`dango-v$VERSION-linux-x86_64.tar.gz\` |"
+            echo
+            echo "### Changes"
+            if [ -n "$prev" ]; then
+              git log "$prev..v$VERSION" --pretty=format:"* %s (%h)" --no-merges | grep -v 'chore: release' || true
+            else
+              git log -n 30 --pretty=format:"* %s (%h)" --no-merges
+            fi
+          } > notes.md
+          cat notes.md
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ env.VERSION }}
+          name: dango v${{ env.VERSION }}
+          body_path: notes.md
+          files: dist/*
+          make_latest: true

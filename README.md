@@ -1,292 +1,131 @@
-<div align="center">
+<p align="center">
+  <img src="app/icons/icon.png" width="112" alt="dango" />
+</p>
 
-<img src="client/public/repo_logo.svg" alt="dango logo" width="420" height="145"/>
+<h1 align="center">dango</h1>
 
-_A local-first anime web app focused on performance, privacy, and personal library tracking._
+<p align="center">
+  A fast, native desktop anime player for Windows and Linux.<br/>
+  It finds a working source, starts playback right away, and buffers the whole episode to disk.
+</p>
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-897cff?style=for-the-badge)](https://opensource.org/licenses/MIT)
-![Github stars](https://img.shields.io/github/stars/serifpersia/dango.svg?style=for-the-badge&color=897cff)
-[![App version](https://img.shields.io/badge/dango-3.9.1-897cff?style=for-the-badge)](https://github.com/serifpersia/dango)
-
-[![Provider Status](https://dango-users-badge.ramiserifpersia.workers.dev/?provider=all)](https://dango-users-badge.ramiserifpersia.workers.dev/?view=status)
-
-![Animation](docs/showcase.webp)
-
-</div>
-
----
-
-**dango** is a lightweight, self-hosted Node.js application built for querying anime metadata, managing personal watchlists, and logging viewing progress through a fast local interface.
-
-## Highlights
-
-- **Hardware Efficient:** Engineered with a minimal footprint to run effortlessly on low-spec hardware, SBCs, and mobile environments.
-- **Metadata & Discovery:** Browse trending titles, search catalog entries, and view release schedules locally.
-- **Multi-Provider Playback:** Switch seamlessly between multiple third-party streaming providers directly within the player interface.
-- **Watch Along:** Create a room below a direct HLS anime, TV, or movie player and share the invite. Each viewer uses their own Dango; the host controls playback. No port forwarding needed. End the room when finished, or it expires after six hours.
-- **Watchlist Tracking:** Categorize titles (Watching, Completed, Plan to Watch) with fine-grained progress states.
-- **Library Insights:** Built-in dashboard tracking viewing habits, personal stats, and completion ratios.
-- **Trackers & Sync:** Bi-directional AniList and MyAnimeList sync for anime and manga, plus username and XML list imports.
-- **Expanded Media Hub:** Dedicated interfaces for Manga, ASMR, and TV/Movies.
-- **LAN Security:** Optional LAN authentication with password enforcement for multi-device local network deployments.
-- **[Profiles](docs/profiles.md):** Separate libraries, tracker/cloud connections and preferences, with optional profile passwords and custom images.
+<p align="center">
+  <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-ff8fb8?style=for-the-badge" alt="MIT"/></a>
+  <img src="https://img.shields.io/badge/Rust-Tauri%202-ff8fb8?style=for-the-badge" alt="Rust + Tauri"/>
+  <img src="https://img.shields.io/badge/Windows%20%7C%20Linux-desktop-ff8fb8?style=for-the-badge" alt="platforms"/>
+</p>
 
 ---
 
-## Join the dango Discord server
+## What it does
 
-Be part of the dango community where you can connect with fellow users, ask questions, and share your experiences:
+- **Automatic source picking.** Searching already contacts every provider in the background for the top results. Opening a show runs all providers in parallel: each one finds the show, lists its episodes and **test-plays a stream**. Working sources are ranked by verified playback, episode coverage and latency, and the best one is used. You can switch to any other provider, stream or quality at any time.
+- **Automatic failover.** If a quality, stream or provider fails during playback, dango moves on to the next one and keeps your position.
+- **Real-time download to disk.** Playback goes through a local streaming cache. HLS episodes download ahead of the playhead in parallel, so seeking within the episode is instant and stalls are rare. MP4 sources download progressively and play from the partial file while the download continues.
+- **Automatic cleanup.** The cache has a size limit and a maximum age. The oldest files are evicted (LRU) on startup and every 10 minutes, and partial downloads are cleared on launch.
+- **Caching everywhere.** AniList responses (memory + SQLite), provider show IDs and episode lists, playlists, subtitles and cover images (on disk) are all cached, so the app is fast after the first load.
+- **A native desktop app.** One small executable with a native window, no browser and no server to run. Built with Rust and Tauri, with a plain-JS UI and no framework.
+- Continue watching, library, resume position, prepared next episode, autoplay, skip-intro (aniskip), subtitles (VTT/SRT/ASS → VTT), SUB/DUB, keyboard-driven player.
 
-[![Discord Server](https://discordapp.com/api/guilds/1559959149721288795/widget.png?style=banner2)](https://discord.gg/6yT3VwTqz9)
+## Download
 
----
+Grab the latest build from [Releases](https://github.com/serifpersia/dango/releases):
 
-## Installation
+| Platform | File |
+| --- | --- |
+| Windows installer | `dango-vX.Y.Z-windows-x64-setup.exe` |
+| Windows portable | `dango-vX.Y.Z-windows-x64-portable.exe` |
+| Linux AppImage | `dango-vX.Y.Z-linux-x86_64.AppImage` |
+| Debian / Ubuntu | `dango-vX.Y.Z-linux-amd64.deb` |
+| Linux binary | `dango-vX.Y.Z-linux-x86_64.tar.gz` |
 
-### Prerequisites
+- **Windows** needs the WebView2 runtime, which ships with Windows 10/11 (the installer adds it if it's missing).
+- **Linux** needs WebKitGTK 4.1 and GTK 3 (`libwebkit2gtk-4.1-0`, `libgtk-3-0`). The AppImage and .deb take care of this on most distros.
+- **Portable mode:** put an empty file named `portable` next to the executable. Data and cache then live in a `data/` folder beside it.
 
-| Requirement | Supported Version      | Notes                                                     |
-| :---------- | :--------------------- | :-------------------------------------------------------- |
-| **Node.js** | `>= 22.12.0`           | Required runtime ([Download](https://nodejs.org/))        |
-| **npm**     | Bundled with Node      | Global install (`npm install -g @serifpersia/dango`)      |
-| **pnpm**    | `11` (`npm i -g pnpm`) | Only needed for source development (`run.bat` / `run.sh`) |
+## Keyboard
 
----
+| Key | Action |
+| --- | --- |
+| `/` or `Ctrl+K` | Focus search |
+| `Space` / `K` | Play / pause |
+| `←` `→` (`Shift` = 30 s) | Seek 5 s |
+| `J` / `L` | Seek 10 s |
+| `↑` `↓` | Volume |
+| `0`–`9` | Jump to 0–90 % |
+| `F` / double-click | Fullscreen |
+| `N` / `P` | Next / previous episode |
+| `E` | Episode list |
+| `C` | Subtitles menu |
+| `S` | Skip intro / outro |
+| `M` | Mute |
+| `Esc` | Close menu → exit fullscreen → close player |
 
-### Quick Install (CLI)
+## Where content comes from
 
-Install the global CLI binary via npm:
+dango doesn't bundle any scrapers. Metadata comes from **AniList** (search, details, episode counts, artwork), with **aniskip** for intro timestamps. Streams come from the community **provider registry** ([serifpersia/dango-providers](https://github.com/serifpersia/dango-providers)): small JavaScript modules that dango downloads, checks against their SHA-256 hash, caches, and runs in an embedded JavaScript engine. Providers update independently of the app. You can point dango at another registry in *Settings → Providers*.
+
+Provider modules are code from that repository and run with the app's permissions. Only use registries you trust as much as the app itself.
+
+## Building from source
+
+Requirements: a recent stable Rust toolchain. On Windows, the MSVC build tools. On Linux:
 
 ```bash
-npm install -g @serifpersia/dango
+sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev
 ```
 
-Launch the interface from anywhere:
+Run the app:
 
 ```bash
-dango
+cargo run -p dango
 ```
 
-> [!IMPORTANT]
-> Once the server initializes, navigate to `http://localhost:3000` in your browser (or whatever `PORT` you set, see [Manual Setup](#manual-setup-development)). The background process runs locally until terminated (`Ctrl + C or q key press as well as window X button closing action`).
-
----
-
-### Release Zip (no install)
-
-No `npm install` needed - dependencies ship inside the zip, client is prebuilt:
-
-1. Download and extract `dango.zip` from [Releases](https://github.com/serifpersia/dango/releases).
-2. Install Node.js 22.12+ (`node --version` to check).
-3. Launch using `run.bat` (Windows) or `./run.sh` (Linux/macOS), then open `http://localhost:3000` (`http://localhost:$PORT` if you changed it).
-
----
-
-### Android Installation
-
-<details>
-<summary><b>Option 1: Termux Environment</b></summary>
-
-<br>
-
-Run standard dango via Termux:
-
-1. Install **[Termux](https://termux.dev/)** (obtain via [F-Droid](https://f-droid.org/en/packages/com.termux/)).
-2. Update base dependencies:
-   ```bash
-   pkg update
-   ```
-   ```bash
-   pkg upgrade -y
-   ```
-3. Install Node.js:
-   ```bash
-   pkg install nodejs -y
-   ```
-4. Install and run dango:
-   ```bash
-   npm install -g @serifpersia/dango
-   dango
-   ```
-5. Open your mobile browser at `http://localhost:3000` (`http://localhost:$PORT` if you changed it).
-
-</details>
-
-<details>
-<summary><b>Option 2: Standalone APK</b></summary>
-
-<br>
-
-A standalone bundle packaging Node.js, dango, and a local WebView container.
-
-1. From [Releases](https://github.com/serifpersia/dango/releases), download the APK matching your device: `-arm64-v8a.apk` for almost all modern phones, or `-armeabi-v7a.apk` for older 32-bit devices.
-2. Install the APK (allow _Install from Unknown Sources_ when prompted).
-3. Open the app. Core runtimes auto-provision on first launch.
-
-> Updating from the old universal APK requires one manual install of the matching per-ABI APK. In-app updates work normally after that.
-
-**Compiling from Source:**
+Optimized single executable (`target/release/dango[.exe]`):
 
 ```bash
-cd android-app
-python fetch-termux-node.py
-
-# Windows
-build-debug.bat
-
-# Linux / macOS
-chmod +x build-debug.sh && ./build-debug.sh
+cargo build --release -p dango
 ```
 
-_Build requirements: Python 3, JDK 17+, Android SDK (Platform 36, Build-Tools 36.0.0)._
-
-</details>
-
----
-
-## Manual Setup (Development)
-
-The project is structured as a **pnpm workspace** (`client` and `server`) managed by a unified lockfile. You need Node.js 22.12+ and pnpm 11 (`npm install -g pnpm`).
+Installers (NSIS / AppImage / deb) via the Tauri CLI:
 
 ```bash
-# Clone the repository
-git clone https://github.com/serifpersia/dango.git
-cd dango
-
-# Install dependencies (root + workspaces)
-pnpm install
-
-# Compile workspaces (Vite frontend + tsc backend)
-pnpm run build
+cd app && npx @tauri-apps/cli@2 build
 ```
 
-Run via interactive environment scripts:
+Tests, plus the opt-in live provider check:
 
 ```bash
-# Linux / macOS
-chmod +x run.sh && ./run.sh
-
-# Windows
-run.bat
+cargo test --workspace
 ```
-
-Set `PORT` to change the backend port (default: `3000`) and `DEV_PORT` to change the Vite
-frontend port (default: `5173`). The dev proxy and the Google OAuth callback follow both
-values automatically. They are read from the environment of the process you launch, not
-from dango's `.env`, so export them in the shell before starting:
 
 ```bash
-PORT=4000 DEV_PORT=5174 pnpm run dev
-PORT=4000 pnpm start
+cargo run -p dango-core --example e2e -- "frieren"
 ```
 
-You can also set ports as launch options. These override the corresponding
-environment variables:
+`e2e` runs the whole pipeline against the live internet: search, provider probing, stream resolution, playing through the local proxy and the background download.
 
-```bash
-dango --port 4000
-dango dev --port 4000 --dev-port 5174
-# From a source checkout:
-pnpm start --port 4000
-pnpm run dev --port 4000 --dev-port 5174
-```
+## Releases
 
-OAuth callbacks follow the port, and redirect URIs are registered with the provider:
+Every push to `main` runs [`.github/workflows/release.yml`](.github/workflows/release.yml), which:
 
-| Provider | Registered redirect URIs                                                                                    |
-| :------- | :---------------------------------------------------------------------------------------------------------- |
-| AniList  | `http://localhost:3000/api/tracker/anilist/callback`                                                        |
-| Google   | `http://localhost:3000/api/auth/google/callback` and `http://localhost:5173/api/auth/google/callback` (dev) |
+1. runs format, clippy and tests on Windows and Linux,
+2. computes the next version (patch by default; put `#minor` or `#major` in the commit message for bigger bumps, or `[skip release]` to skip),
+3. builds the Windows (installer + portable exe) and Linux (AppImage, deb, tarball) artifacts,
+4. commits the version bump, tags `vX.Y.Z` and publishes a GitHub release with the files and a changelog.
 
-Sign-in breaks with `redirect_uri_mismatch` when the port you run on is not on that list, so
-a custom port needs your own AniList client and your own Google OAuth client (see Settings).
-GitHub uses the device flow and rclone needs no local port, so both keep working on any port.
-
-### Command Reference
-
-| Command                              | Action                                     |
-| :----------------------------------- | :----------------------------------------- |
-| `dango`                              | Start the installed client daemon          |
-| `dango --version`                    | Display current installed version          |
-| `pnpm run dev`                       | Start full dev stack via `orchestrator.js` |
-| `pnpm --filter dango-client run dev` | Run Vite frontend independently            |
-| `pnpm --filter dango-server run dev` | Run backend via `tsx watch`                |
-| `pnpm -r run lint`                   | Run ESLint passes across all packages      |
-
----
-
-## Storage & Persistence
-
-dango stores SQLite databases, cached indices, and credentials in the OS application data registry rather than the global `node_modules` path:
-
-| Platform    | Default Path                                     |
-| :---------- | :----------------------------------------------- |
-| **Windows** | `%APPDATA%\dango`                                |
-| **macOS**   | `~/Library/Application Support/dango`            |
-| **Linux**   | `$XDG_DATA_HOME/dango` or `~/.local/share/dango` |
-
-> [!IMPORTANT]
-> Legacy installs will automatically migrate `.env` variables and SQLite records from older `server/` structures into the proper user directory on launch.
-
----
-
-## Data Synchronization
-
-dango is **local-first**: primary application state lives in your local SQLite store. Cloud syncing creates point-in-time JSON snapshots to maintain seamless backups across multiple installations.
+## Project layout
 
 ```
-Sync Priority Engine:
-[1] GitHub Sync ──(fallback)──> [2] Google Drive ──(fallback)──> [3] Rclone
+crates/dango-core   engine: providers, resolver, stream cache, metadata, storage
+app/                Tauri desktop shell + UI (app/ui, plain HTML/CSS/JS)
+tools/js-vendor     regenerates the vendored cheerio/Buffer bundle and hls.js
 ```
 
-### 1. GitHub Sync
+See [CLAUDE.md](CLAUDE.md) for a deeper architecture tour.
 
-1. Open **Settings → Synchronization**.
-2. Click **Sign in with GitHub**.
-3. Authorize via the OAuth device code flow.
+## Credits & license
 
-dango creates a private repository named `dango-sync-data` to read/write JSON snapshots (`sync.json` for production, `sync.dev.json` for development).
+dango was created by [serifpersia](https://github.com/serifpersia/dango). This is a Rust rewrite of the original Node.js app and uses the same provider registry and module contract.
 
-### 2. Google Drive
-
-1. Open **Settings → Synchronization**.
-2. Click **Sign in with Google** and authorize permissions.
-
-Data writes directly to a sandbox `appDataFolder` on your personal Drive. To clear backups, revoke app permissions under Google Drive's _Manage Apps_ menu.
-
-> [!IMPORTANT]
-> Advanced users can supply their own custom Github and Google OAuth Client ID & Secret in settings.
-
-### 3. Rclone (Third-Party Remotes)
-
-Used as a manual fallback for services like Mega, Dropbox, or custom WebDAV:
-
-1. Ensure `rclone` is installed and mapped to your system `PATH`.
-2. Configure your desired target via `rclone config`.
-3. Pick your configured remote profile inside **Settings → Synchronization**.
-
----
-
-## Tracker Integrations
-
-### AniList
-
-Bidirectional sync for anime and manga. Go to **Trackers**, connect, then **Sync Now** (anime) / **Start Sync** (manga). Progress and statuses merge both ways; remote-only entries import, local-only entries push. AniList requires no setup.
-
-### MyAnimeList
-
-Release builds use Dango's auth worker (no setup). For your own app, create one at [MAL API settings](https://myanimelist.net/apiconfig), register `your-origin/api/tracker/mal/callback`, and paste client ID/secret in **Trackers** (or set `MAL_CLIENT_ID`/`MAL_CLIENT_SECRET`). MAL needs the secret even with PKCE. `MAL_AUTH_WORKER_URL` points self-built releases at a worker.
-
-**Sync Now** merges your authenticated list both ways. Remote-only entries import, local-only push, missing entries are never deleted. Unmatched titles are reported, not guessed. Username and XML imports work without login. Manga sync links by exact title first, then searches up to 25 unlinked titles per sync.
-
-Progress is pushed on **Sync Now** (and on playback once an episode reaches 80% for the active tracker). MAL tokens refresh automatically; credentials stay on this server and are excluded from library exports. Disconnect removes local tokens. Server needs HTTPS access to `myanimelist.net`, `api.myanimelist.net`, and `graphql.anilist.co`.
-
----
-
-## Disclaimer & Legal
-
-dango is an open-source, local-first web app. It does not host or distribute unauthorized media or copyrighted video assets. Users are solely responsible for ensuring their usage aligns with relevant local laws and digital copyright regulations.
-
-## License
-
-Distributed under the terms of the [MIT License](LICENSE).
+Released under the [MIT License](LICENSE).

@@ -1,2 +1,9 @@
-# Auto detect text files and perform LF normalization (matches prettier endOfLine: lf)
+# Auto detect text files and normalize to LF
 * text=auto eol=lf
+
+*.png binary
+*.ico binary
+
+# Generated/vendored bundles
+crates/dango-core/js/vendor.js linguist-generated -diff
+app/ui/vendor/** linguist-vendored -diff

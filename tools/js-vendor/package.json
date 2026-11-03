@@ -1,0 +1,15 @@
+{
+  "name": "dango-js-vendor",
+  "private": true,
+  "description": "Builds crates/dango-core/js/vendor.js (cheerio + Buffer) for the embedded QuickJS provider runtime and copies hls.js into app/ui/vendor.",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs"
+  },
+  "devDependencies": {
+    "buffer": "6.0.3",
+    "cheerio": "1.0.0",
+    "esbuild": "0.24.0",
+    "hls.js": "1.5.17"
+  }
+}

@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>dango</title>
+    <link rel="stylesheet" href="app.css" />
+    <script src="vendor/hls.min.js" defer></script>
+    <script src="app.js" type="module"></script>
+  </head>
+  <body>
+    <div id="app">
+      <nav id="rail" aria-label="Main">
+        <a class="logo" href="#/" title="dango">
+          <svg viewBox="0 0 64 64" aria-hidden="true">
+            <line x1="14" y1="52" x2="52" y2="12" stroke="#c4965f" stroke-width="4" stroke-linecap="round" />
+            <circle cx="22" cy="44" r="9.5" fill="#8bd38a" />
+            <circle cx="32" cy="33" r="9.5" fill="#f6f1ea" />
+            <circle cx="42" cy="22" r="9.5" fill="#ff8fb8" />
+          </svg>
+        </a>
+        <a href="#/" data-nav="home" title="Home (g h)"><i class="ic ic-home"></i><span>Home</span></a>
+        <a href="#/search" data-nav="search" title="Search (/)"><i class="ic ic-search"></i><span>Search</span></a>
+        <a href="#/library" data-nav="library" title="Library (g l)"><i class="ic ic-lib"></i><span>Library</span></a>
+        <div class="grow"></div>
+        <a href="#/settings" data-nav="settings" title="Settings"><i class="ic ic-gear"></i><span>Settings</span></a>
+      </nav>
+      <main id="main">
+        <header id="topbar">
+          <div class="searchbox">
+            <i class="ic ic-search"></i>
+            <input id="q" type="search" placeholder="Search anime…" autocomplete="off" spellcheck="false" />
+            <kbd>/</kbd>
+          </div>
+          <div id="status" class="status"></div>
+        </header>
+        <section id="view" tabindex="-1"></section>
+      </main>
+    </div>
+
+    <div id="player" class="player hidden" tabindex="-1">
+      <video id="video" playsinline crossorigin="anonymous"></video>
+      <iframe id="embed" class="hidden" allow="autoplay; fullscreen; encrypted-media" allowfullscreen referrerpolicy="origin"></iframe>
+      <div class="p-top">
+        <button class="pbtn" data-act="close" title="Back (Esc)"><i class="ic ic-back"></i></button>
+        <div class="p-title"><b id="p-show"></b><span id="p-ep"></span></div>
+        <div class="p-src" id="p-srcinfo"></div>
+      </div>
+      <div class="p-center">
+        <div id="p-spinner" class="spinner hidden"></div>
+        <div id="p-msg" class="p-msg hidden"></div>
+      </div>
+      <button id="p-skip" class="skip hidden">Skip intro</button>
+      <div class="p-bottom">
+        <div class="seek" id="seek">
+          <div class="bar disk" id="bar-disk"></div>
+          <div class="bar buf" id="bar-buf"></div>
+          <div class="bar played" id="bar-played"></div>
+          <div class="knob" id="knob"></div>
+          <div class="tip" id="seek-tip">0:00</div>
+        </div>
+        <div class="p-controls">
+          <button class="pbtn" data-act="prev" title="Previous episode (p)"><i class="ic ic-prev"></i></button>
+          <button class="pbtn big" data-act="play" title="Play / pause (space)"><i class="ic ic-play" id="ic-play"></i></button>
+          <button class="pbtn" data-act="next" title="Next episode (n)"><i class="ic ic-next"></i></button>
+          <div class="vol">
+            <button class="pbtn" data-act="mute" title="Mute (m)"><i class="ic ic-vol" id="ic-vol"></i></button>
+            <input type="range" id="volume" min="0" max="1" step="0.01" value="1" aria-label="Volume" />
+          </div>
+          <span class="time"><span id="t-cur">0:00</span> / <span id="t-dur">0:00</span></span>
+          <span class="disk-note" id="disk-note" title="Downloaded to disk"></span>
+          <div class="grow"></div>
+          <button class="pbtn txt" data-menu="sources" title="Sources">Source</button>
+          <button class="pbtn txt" data-menu="quality" title="Quality">Auto</button>
+          <button class="pbtn txt" data-menu="subs" title="Subtitles (c)">CC</button>
+          <button class="pbtn txt" data-menu="speed" title="Speed">1×</button>
+          <button class="pbtn" data-act="episodes" title="Episodes (e)"><i class="ic ic-list"></i></button>
+          <button class="pbtn" data-act="fullscreen" title="Fullscreen (f)"><i class="ic ic-full"></i></button>
+        </div>
+      </div>
+      <div class="menu hidden" id="menu"></div>
+      <aside class="drawer hidden" id="drawer"></aside>
+    </div>
+
+    <div id="toasts"></div>
+  </body>
+</html>

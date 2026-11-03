@@ -1,9 +1,0 @@
-packages:
-  - client
-  - server
-
-allowBuilds:
-  esbuild: true
-
-minimumReleaseAgeExclude:
-  - youtubei.js@18.1.0

@@ -1,0 +1,1126 @@
+// dango desktop UI. Plain ES modules, no framework: everything renders from template
+// strings into #view; the player is a persistent overlay.
+
+const T = window.__TAURI__
+const invoke = (cmd, args) => T.core.invoke(cmd, args)
+
+// ---------------------------------------------------------------- utils
+const $ = (s, el = document) => el.querySelector(s)
+const $$ = (s, el = document) => [...el.querySelectorAll(s)]
+const esc = (s) =>
+  String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c])
+const titleOf = (m) => m?.title?.english || m?.title?.romaji || m?.title?.native || m?.title || '?'
+const coverOf = (m) => m?.coverImage?.extraLarge || m?.coverImage?.large || m?.cover || ''
+const fmtTime = (s) => {
+  if (!isFinite(s) || s < 0) s = 0
+  const h = Math.floor(s / 3600)
+  const m = Math.floor((s % 3600) / 60)
+  const sec = Math.floor(s % 60)
+  return h ? `${h}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}` : `${m}:${String(sec).padStart(2, '0')}`
+}
+const fmtBytes = (b) => {
+  if (!b) return '0 B'
+  const u = ['B', 'KB', 'MB', 'GB', 'TB']
+  const i = Math.min(u.length - 1, Math.floor(Math.log(b) / Math.log(1024)))
+  return `${(b / 1024 ** i).toFixed(i > 1 ? 1 : 0)} ${u[i]}`
+}
+const debounce = (fn, ms) => {
+  let t
+  return (...a) => {
+    clearTimeout(t)
+    t = setTimeout(() => fn(...a), ms)
+  }
+}
+const stripHtml = (s) => {
+  const d = document.createElement('div')
+  d.innerHTML = String(s || '').replace(/<br\s*\/?>/gi, '\n')
+  return d.textContent || ''
+}
+const store = {
+  get(k, d) {
+    try {
+      const v = localStorage.getItem(k)
+      return v == null ? d : JSON.parse(v)
+    } catch {
+      return d
+    }
+  },
+  set(k, v) {
+    try {
+      localStorage.setItem(k, JSON.stringify(v))
+    } catch {}
+  },
+}
+
+function toast(msg, bad = false, ms = 3500) {
+  const el = document.createElement('div')
+  el.className = `toast${bad ? ' bad' : ''}`
+  el.textContent = msg
+  $('#toasts').append(el)
+  setTimeout(() => el.remove(), ms)
+}
+
+// Images fade in once loaded (inline handlers are blocked by the CSP).
+document.addEventListener('load', (e) => e.target.tagName === 'IMG' && e.target.classList.add('ok'), true)
+document.addEventListener('error', (e) => e.target.tagName === 'IMG' && e.target.classList.add('ok'), true)
+
+// ---------------------------------------------------------------- state
+const S = {
+  boot: null,
+  settings: null,
+  probes: new Map(), // anilistId -> snapshot
+  details: new Map(), // anilistId -> media
+  view: null,
+}
+
+T.event.listen('probe', ({ payload }) => {
+  S.probes.set(payload.anilistId, payload)
+  for (const el of $$(`[data-ready="${payload.anilistId}"]`)) el.classList.toggle('hidden', !payload.best)
+  if (S.view?.onProbe) S.view.onProbe(payload)
+  if (Player.open && Player.id === payload.anilistId) Player.onProbe(payload)
+})
+
+async function getDetails(id, force = false) {
+  if (!force && S.details.has(id)) return S.details.get(id)
+  const d = await invoke('details', { id })
+  S.details.set(id, d)
+  return d
+}
+
+// ---------------------------------------------------------------- cards
+function card(m, opts = {}) {
+  const id = m.id
+  const sub = [m.format?.replace('_', ' '), m.seasonYear, m.episodes ? `${m.episodes} ep` : null].filter(Boolean).join(' · ')
+  const ready = S.probes.get(id)?.best
+  const score = m.averageScore ? `<span class="badge">★ ${(m.averageScore / 10).toFixed(1)}</span>` : ''
+  return `<a class="card fade-in" href="#/anime/${id}" data-id="${id}">
+    <div class="poster">${coverOf(m) ? `<img loading="lazy" decoding="async" src="${esc(coverOf(m))}" alt="">` : ''}${score}
+      <span class="ready ${ready ? '' : 'hidden'}" data-ready="${id}" title="Sources ready"></span>${opts.progress ?? ''}</div>
+    <div class="t">${esc(titleOf(m))}</div><div class="s">${esc(sub)}</div></a>`
+}
+
+function continueCard(p) {
+  const pct = p.duration ? Math.min(100, (p.position / p.duration) * 100) : 0
+  return `<a class="card fade-in" href="#/anime/${p.anilistId}" data-resume="${p.anilistId}" data-ep="${esc(p.episode)}">
+    <div class="poster">${p.cover ? `<img loading="lazy" src="${esc(p.cover)}" alt="">` : ''}
+      <span class="badge">EP ${esc(p.episode)}</span><div class="prog"><i style="width:${pct}%"></i></div></div>
+    <div class="t">${esc(p.title || `#${p.anilistId}`)}</div><div class="s">${fmtTime(p.position)} / ${fmtTime(p.duration)}</div></a>`
+}
+
+function skeletonRow(n = 8) {
+  return `<div class="row">${'<div class="card"><div class="poster skeleton"></div></div>'.repeat(n)}</div>`
+}
+
+// ---------------------------------------------------------------- views
+const view = $('#view')
+
+function setView(v) {
+  S.view?.leave?.()
+  S.view = v
+  view.classList.toggle('flush', !!v.flush)
+  view.scrollTop = 0
+}
+
+async function homeView() {
+  setView({ flush: true })
+  const v = S.view
+  view.innerHTML = `<div class="hero"><div class="bg skeleton"></div></div>${skeletonRow()}${skeletonRow()}`
+  const [home, cont] = await Promise.all([invoke('home').catch((e) => (toast(String(e), true), null)), invoke('continue_watching').catch(() => [])])
+  if (S.view !== v) return
+  if (!home) {
+    view.innerHTML = `<div class="empty">Couldn't reach AniList. Check your connection.</div>`
+    return
+  }
+  const trending = home.trending?.media || []
+  const hero = trending.find((m) => m.bannerImage) || trending[0]
+  const row = (title, list, sub = '') =>
+    list.length ? `<h2 class="row-title">${title}${sub ? ` <small>${sub}</small>` : ''}</h2><div class="row">${list.map((m) => card(m)).join('')}</div>` : ''
+  view.innerHTML = `
+    ${
+      hero
+        ? `<div class="hero"><div class="bg" style="background-image:url('${esc(hero.bannerImage || coverOf(hero))}')"></div>
+      <div class="inner fade-in"><span class="chip accent">#1 Trending</span><h1>${esc(titleOf(hero))}</h1>
+      <p>${esc(stripHtml(hero.description || ''))}</p>
+      <div class="actions"><button class="btn primary" data-play="${hero.id}"><i class="ic ic-play"></i>Play</button>
+      <a class="btn" href="#/anime/${hero.id}">Details</a></div></div></div>`
+        : ''
+    }
+    <div style="padding:0 0 10px">
+    ${cont.length ? `<h2 class="row-title">Continue watching</h2><div class="row">${cont.map(continueCard).join('')}</div>` : ''}
+    ${row('Trending now', trending)}
+    ${row('Popular this season', home.season?.media || [])}
+    ${row('All-time favourites', home.top?.media || [])}
+    </div>`
+}
+
+async function searchView(q) {
+  setView({})
+  $('#q').value = q
+  if (!q.trim()) {
+    view.innerHTML = `<div class="empty">Type to search. Sources for the top results are checked in the background.</div>`
+    return
+  }
+  view.innerHTML = `<h2 class="row-title">Results for “${esc(q)}”</h2><div class="grid">${'<div class="card"><div class="poster skeleton"></div></div>'.repeat(12)}</div>`
+  let page = 1
+  let more = false
+  let loading = false
+  const render = async (append) => {
+    loading = true
+    try {
+      const r = await invoke('search', { query: q, page })
+      if (S.view?.q !== q) return
+      more = !!r.pageInfo?.hasNextPage
+      const html = (r.media || []).map((m) => card(m)).join('')
+      if (append) $('.grid', view).insertAdjacentHTML('beforeend', html)
+      else $('.grid', view).innerHTML = html || `<div class="empty">Nothing found.</div>`
+    } catch (e) {
+      toast(String(e), true)
+    } finally {
+      loading = false
+    }
+  }
+  S.view.q = q
+  const onScroll = () => {
+    if (more && !loading && view.scrollTop + view.clientHeight > view.scrollHeight - 600) {
+      page++
+      render(true)
+    }
+  }
+  view.addEventListener('scroll', onScroll)
+  S.view.leave = () => view.removeEventListener('scroll', onScroll)
+  await render(false)
+}
+
+const STATE_LABEL = { pending: 'waiting', resolving: 'searching…', verifying: 'testing stream…', ok: 'ready', missing: 'not found', auth: 'needs cookie', failed: 'error' }
+
+function sourcesPanel(snap, selected) {
+  if (!snap || !snap.sources.length) return `<div class="empty" style="padding:20px 0">Loading providers…</div>`
+  return snap.sources
+    .map((s) => {
+      const usable = s.state === 'ok' && s.playable !== false
+      const cls = `${s.state}${s.state === 'ok' && s.playable == null ? ' unverified' : ''}`
+      const info =
+        s.state === 'ok'
+          ? `${s.episodeCount} ep · ${s.latencyMs ?? '–'} ms${s.playable ? ' · ✓' : ''}${s.embedOnly ? ' · embed' : ''}`
+          : STATE_LABEL[s.state]
+      return `<div class="src ${usable ? '' : 'off'} ${s.provider === selected ? 'on' : ''}" data-provider="${esc(s.provider)}" title="${esc(s.error || '')}">
+        <span class="dot ${cls}"></span><span class="name">${esc(s.label)} <small>${esc(s.sub || '')}</small></span><span class="info">${esc(info)}</span>
+        ${!usable && s.error ? `<span class="err">${esc(s.error)}</span>` : ''}</div>`
+    })
+    .join('')
+}
+
+async function showView(id) {
+  setView({ flush: true, id })
+  view.innerHTML = `<div class="show-hero"><div class="bg skeleton"></div></div>`
+  let m
+  try {
+    m = await getDetails(id, true)
+  } catch (e) {
+    view.innerHTML = `<div class="empty">${esc(e)}</div>`
+    return
+  }
+  if (S.view?.id !== id) return
+  const v = S.view
+  v.selected = store.get(`provider:${id}`, null)
+  v.media = m
+  const progress = new Map((m.progress || []).map((p) => [String(p.episode), p]))
+  const last = (m.progress || []).slice().sort((a, b) => b.updatedAt - a.updatedAt)[0]
+  const thumbs = (m.streamingEpisodes || []).map((e) => e.thumbnail)
+  const studios = (m.studios?.nodes || []).map((s) => s.name).join(', ')
+  const next = m.nextAiringEpisode
+  const chips = [
+    m.format?.replace('_', ' '),
+    m.seasonYear,
+    m.episodes ? `${m.episodes} episodes` : next ? `${next.episode - 1} aired` : null,
+    m.averageScore ? `★ ${(m.averageScore / 10).toFixed(1)}` : null,
+    m.status?.replaceAll('_', ' ').toLowerCase(),
+    studios,
+  ].filter(Boolean)
+  const mode = S.settings.mode
+  view.innerHTML = `
+  <div class="show-hero"><div class="bg" style="background-image:url('${esc(m.bannerImage || coverOf(m))}')"></div>
+    <div class="show-head fade-in">
+      <div class="poster"><img src="${esc(coverOf(m))}" alt=""></div>
+      <div>
+        <h1>${esc(titleOf(m))}</h1>
+        <div class="alt">${esc([m.title?.romaji, m.title?.native].filter((t) => t && t !== titleOf(m)).join(' · '))}</div>
+        <div class="meta">${chips.map((c) => `<span class="chip">${esc(c)}</span>`).join('')}
+          ${(m.genres || []).slice(0, 4).map((g) => `<span class="chip">${esc(g)}</span>`).join('')}
+          ${next ? `<span class="chip accent">EP ${next.episode} in ${Math.ceil(next.timeUntilAiring / 86400)}d</span>` : ''}</div>
+        <div class="actions">
+          <button class="btn primary" id="play-main"><i class="ic ic-play"></i>${last ? `Resume EP ${esc(last.episode)}` : 'Play EP 1'}</button>
+          <button class="btn" id="lib-toggle"><i class="ic ${m.inLibrary ? 'ic-check' : 'ic-plus'}"></i>${m.inLibrary ? 'In library' : 'Add to library'}</button>
+          <div class="seg" id="mode-seg"><button data-mode="sub" class="${mode === 'sub' ? 'on' : ''}">SUB</button><button data-mode="dub" class="${mode === 'dub' ? 'on' : ''}">DUB</button></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="show-body">
+    <div>
+      <div class="desc clamp" id="desc">${esc(stripHtml(m.description || 'No description.'))}</div>
+      <span class="link" id="desc-more">Show more</span>
+      <div class="eps-head"><h2>Episodes</h2><span class="chip" id="ep-src"></span><input id="ep-filter" placeholder="Jump to #" /></div>
+      <div class="eps" id="eps"></div>
+      ${
+        (m.recommendations?.nodes || []).filter((n) => n.mediaRecommendation).length
+          ? `<h2 class="row-title">You might also like</h2><div class="row">${m.recommendations.nodes
+              .filter((n) => n.mediaRecommendation)
+              .map((n) => card(n.mediaRecommendation))
+              .join('')}</div>`
+          : ''
+      }
+    </div>
+    <aside><div class="panel"><h3>Sources <span class="grow"></span><span id="probe-state" class="chip"></span></h3><div class="sources" id="sources"></div></div></aside>
+  </div>`
+
+  const fallbackEps = () => {
+    const n = m.episodes || (next ? next.episode - 1 : 0) || thumbs.length || 1
+    return Array.from({ length: n }, (_, i) => ({ number: String(i + 1), title: m.streamingEpisodes?.[i]?.title || null }))
+  }
+  v.episodes = fallbackEps()
+  const renderEps = () => {
+    const list = v.episodes
+    const compact = list.length > 60
+    const el = $('#eps')
+    if (!el) return
+    el.classList.toggle('compact', compact)
+    el.innerHTML = list
+      .map((e, i) => {
+        const p = progress.get(String(e.number))
+        const pct = p && p.duration ? Math.min(100, (p.position / p.duration) * 100) : 0
+        const watched = pct > 90
+        const th = thumbs[i]
+        const t = e.title ? e.title.replace(/^Episode\s+\d+\s*-\s*/i, '') : `Episode ${e.number}`
+        return `<div class="ep ${watched ? 'watched' : ''}" data-ep="${esc(e.number)}">
+          <div class="th" ${th ? `style="background-image:url('${esc(th)}')"` : ''}>${th ? '' : esc(e.number)}</div>
+          <div><div class="n">EP ${esc(e.number)}</div><div class="tt">${esc(t)}</div></div>${pct ? `<span class="bar" style="width:${pct}%"></span>` : ''}</div>`
+      })
+      .join('')
+  }
+  renderEps()
+
+  const loadEpisodes = async (provider) => {
+    $('#ep-src').textContent = provider ? `from ${provider}` : ''
+    if (!provider) return
+    try {
+      const eps = await invoke('episodes', { id, provider })
+      if (S.view !== v || !eps.length) return
+      // Keep AniList titles where the provider has none.
+      const fb = new Map(fallbackEps().map((e) => [e.number, e.title]))
+      v.episodes = eps.map((e) => ({ number: e.number, title: e.title || fb.get(e.number) || null }))
+      renderEps()
+    } catch (e) {
+      console.warn(e)
+    }
+  }
+
+  const renderSources = (snap) => {
+    const sel = v.selected && snap?.sources.some((s) => s.provider === v.selected && s.state === 'ok') ? v.selected : snap?.best
+    $('#sources').innerHTML = sourcesPanel(snap, sel)
+    const ok = snap?.sources.filter((s) => s.state === 'ok' && s.playable !== false).length ?? 0
+    $('#probe-state').textContent = snap ? (snap.done ? `${ok} working` : 'checking…') : ''
+    if (sel && sel !== v.loadedProvider) {
+      v.loadedProvider = sel
+      loadEpisodes(sel)
+    }
+  }
+  v.onProbe = (snap) => snap.anilistId === id && renderSources(snap)
+  renderSources(S.probes.get(id))
+  invoke('probe', { id })
+    .then((snap) => {
+      S.probes.set(id, snap)
+      if (S.view === v) renderSources(snap)
+    })
+    .catch((e) => toast(String(e), true))
+
+  $('#sources').addEventListener('click', (e) => {
+    const el = e.target.closest('.src:not(.off)')
+    if (!el) return
+    v.selected = el.dataset.provider
+    store.set(`provider:${id}`, v.selected)
+    renderSources(S.probes.get(id))
+  })
+  $('#eps').addEventListener('click', (e) => {
+    const el = e.target.closest('.ep')
+    if (el) Player.play(m, el.dataset.ep, { provider: v.selected, episodes: v.episodes })
+  })
+  $('#play-main').onclick = () => Player.play(m, last ? last.episode : v.episodes[0]?.number || '1', { provider: v.selected, episodes: v.episodes })
+  $('#desc-more').onclick = (e) => {
+    $('#desc').classList.toggle('clamp')
+    e.target.textContent = $('#desc').classList.contains('clamp') ? 'Show more' : 'Show less'
+  }
+  $('#ep-filter').addEventListener('input', (e) => {
+    const n = e.target.value.trim()
+    const el = n && $(`.ep[data-ep="${CSS.escape(n)}"]`)
+    if (el) el.scrollIntoView({ block: 'center', behavior: 'smooth' })
+  })
+  $('#lib-toggle').onclick = async () => {
+    try {
+      if (m.inLibrary) await invoke('library_remove', { id })
+      else await invoke('library_add', { id, title: titleOf(m), cover: coverOf(m) })
+      m.inLibrary = !m.inLibrary
+      $('#lib-toggle').innerHTML = `<i class="ic ${m.inLibrary ? 'ic-check' : 'ic-plus'}"></i>${m.inLibrary ? 'In library' : 'Add to library'}`
+    } catch (e) {
+      toast(String(e), true)
+    }
+  }
+  $('#mode-seg').addEventListener('click', async (e) => {
+    const b = e.target.closest('button')
+    if (!b || b.dataset.mode === S.settings.mode) return
+    S.settings = await invoke('set_settings', { settings: { ...S.settings, mode: b.dataset.mode } })
+    showView(id)
+  })
+}
+
+async function libraryView() {
+  setView({})
+  const [lib, cont] = await Promise.all([invoke('library').catch(() => []), invoke('continue_watching').catch(() => [])])
+  view.innerHTML = `
+    ${cont.length ? `<h2 class="row-title">Continue watching</h2><div class="row">${cont.map(continueCard).join('')}</div>` : ''}
+    <h2 class="row-title">Library <small>${lib.length} shows</small></h2>
+    ${
+      lib.length
+        ? `<div class="grid">${lib.map((e) => card({ id: e.anilistId, title: e.title, cover: e.cover })).join('')}</div>`
+        : `<div class="empty">Shows you add appear here.</div>`
+    }`
+}
+
+async function settingsView() {
+  setView({})
+  const s = (S.settings = await invoke('get_settings'))
+  const [providers, stats] = await Promise.all([invoke('providers'), invoke('cache_stats')])
+  const pct = Math.min(100, (stats.bytes / (s.cacheLimitMb * 1024 * 1024)) * 100)
+  const sw = (key, label, hint) => `<div class="field"><div class="l"><b>${label}</b><span>${hint}</span></div>
+      <label class="switch"><input type="checkbox" data-key="${key}" ${s[key] ? 'checked' : ''}><span></span></label></div>`
+  const num = (key, label, hint, min, max) => `<div class="field"><div class="l"><b>${label}</b><span>${hint}</span></div>
+      <input type="number" data-key="${key}" value="${s[key]}" min="${min}" max="${max}"></div>`
+  const txt = (key, label, hint, ph = '') => `<div class="field"><div class="l"><b>${label}</b><span>${hint}</span></div>
+      <input type="text" data-key="${key}" value="${esc(s[key] ?? '')}" placeholder="${esc(ph)}" spellcheck="false"></div>`
+  view.innerHTML = `<div class="settings fade-in">
+    <h1>Settings</h1>
+    <div class="panel">
+      <h3>Playback</h3>
+      <div class="field"><div class="l"><b>Audio</b><span>Prefer subtitles or dubbed audio</span></div>
+        <select data-key="mode"><option value="sub" ${s.mode === 'sub' ? 'selected' : ''}>Subbed</option><option value="dub" ${s.mode === 'dub' ? 'selected' : ''}>Dubbed</option></select></div>
+      ${sw('autoplayNext', 'Autoplay next episode', 'Continue automatically when an episode ends')}
+      ${sw('autoSkipIntro', 'Skip intros automatically', 'Uses community timestamps from aniskip')}
+      ${sw('showMature', 'Show mature content', 'Include 18+ titles and providers')}
+      <div class="field"><div class="l"><b>Preferred provider</b><span>Ranked first whenever it works</span></div>
+        <select data-key="preferredProvider"><option value="">Automatic</option>${providers
+          .map((p) => `<option value="${esc(p.id)}" ${s.preferredProvider === p.id ? 'selected' : ''}>${esc(p.label)}</option>`)
+          .join('')}</select></div>
+    </div>
+    <div class="panel">
+      <h3>Buffering &amp; cache</h3>
+      ${sw('downloadAhead', 'Download whole episode while playing', 'Segments are saved to disk ahead of the playhead, seeking is instant')}
+      ${num('downloadConcurrency', 'Parallel downloads', 'Segments fetched at the same time', 1, 12)}
+      ${sw('prefetchNextEpisode', 'Prepare next episode', 'Resolve the next episode near the end of the current one')}
+      ${num('cacheLimitMb', 'Cache size limit (MB)', 'Oldest files are removed above this size', 256, 524288)}
+      ${num('cacheMaxAgeHours', 'Keep cached video for (hours)', 'Older stream files are cleaned up automatically', 1, 2160)}
+      <div class="meter"><i style="width:${pct}%"></i></div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><span class="chip">${fmtBytes(stats.bytes)} used · ${stats.files} files</span>
+        <span class="chip">video ${fmtBytes(stats.segmentBytes + stats.fileBytes)}</span><span class="chip">images ${fmtBytes(stats.imageBytes)}</span><span class="grow"></span>
+        <button class="btn small" data-cache="sweep">Clean up now</button><button class="btn small" data-cache="video">Clear video cache</button><button class="btn small" data-cache="all">Clear everything</button></div>
+      <div style="margin-top:10px;color:var(--dim);font-size:12px">Cache: ${esc(S.boot.paths.cache)}</div>
+    </div>
+    <div class="panel">
+      <h3>Providers <span class="grow"></span><button class="btn small" id="prov-refresh"><i class="ic ic-refresh"></i>Update</button></h3>
+      <table class="prov-table">${providers
+        .map(
+          (p) => `<tr><td><span class="dot ${p.loaded ? 'ok' : 'failed'}" style="display:inline-block"></span></td><td><b>${esc(p.label)}</b> <small style="color:var(--dim)">v${esc(p.version)}${p.mature ? ' · 18+' : ''}</small></td>
+          <td class="e" title="${esc(p.error || '')}">${esc(p.error || [p.sub && `${p.sub} subs`, p.tier].filter(Boolean).join(' · '))}</td>
+          <td style="text-align:right"><label class="switch"><input type="checkbox" data-prov="${esc(p.id)}" ${s.disabledProviders.includes(p.id) ? '' : 'checked'}><span></span></label></td></tr>`
+        )
+        .join('')}</table>
+      ${txt('registryUrl', 'Registry URL', 'Leave empty for the official provider registry', 'https://raw.githubusercontent.com/serifpersia/dango-providers/main/registry.json')}
+      ${txt('cfClearance', 'Cloudflare cookie (cf_clearance)', 'Only needed for providers behind Cloudflare, e.g. AnimePahe')}
+      ${txt('cfUserAgent', 'Browser user-agent for that cookie', 'Must match the browser the cookie came from')}
+    </div>
+    <div style="color:var(--dim);font-size:12px">dango ${esc(S.boot.version)} · data: ${esc(S.boot.paths.data)}</div>
+  </div>`
+
+  const save = debounce(async () => {
+    try {
+      S.settings = await invoke('set_settings', { settings: S.settings })
+      toast('Saved', false, 1200)
+    } catch (e) {
+      toast(String(e), true)
+    }
+  }, 350)
+  view.addEventListener('change', (e) => {
+    const el = e.target
+    if (el.dataset.key) {
+      const k = el.dataset.key
+      let val = el.type === 'checkbox' ? el.checked : el.type === 'number' ? Number(el.value) : el.value
+      if ((k === 'preferredProvider' || k === 'registryUrl' || k === 'cfClearance' || k === 'cfUserAgent') && !val) val = null
+      S.settings = { ...S.settings, [k]: val }
+      save()
+    } else if (el.dataset.prov) {
+      const id = el.dataset.prov
+      const set = new Set(S.settings.disabledProviders)
+      el.checked ? set.delete(id) : set.add(id)
+      S.settings = { ...S.settings, disabledProviders: [...set] }
+      S.probes.clear()
+      save()
+    }
+  })
+  $('#prov-refresh').onclick = async (e) => {
+    e.currentTarget.disabled = true
+    try {
+      await invoke('refresh_providers')
+      toast('Providers updated')
+      settingsView()
+    } catch (err) {
+      toast(String(err), true)
+      e.currentTarget.disabled = false
+    }
+  }
+  view.addEventListener('click', async (e) => {
+    const b = e.target.closest('[data-cache]')
+    if (!b) return
+    const kind = b.dataset.cache
+    const r =
+      kind === 'sweep' ? await invoke('sweep_cache') : await invoke('clear_cache', { images: kind === 'all' })
+    toast(`Removed ${r.removed} files (${fmtBytes(r.freed)})`)
+    settingsView()
+  })
+}
+
+// ---------------------------------------------------------------- router
+async function route() {
+  const hash = location.hash.slice(1) || '/'
+  const [path, qs] = hash.split('?')
+  const params = new URLSearchParams(qs || '')
+  for (const a of $$('#rail a[data-nav]')) a.classList.remove('on')
+  const nav = (n) => $(`#rail a[data-nav="${n}"]`)?.classList.add('on')
+  try {
+    if (path === '/' || path === '') {
+      nav('home')
+      await homeView()
+    } else if (path === '/search') {
+      nav('search')
+      await searchView(params.get('q') || '')
+    } else if (path.startsWith('/anime/')) {
+      await showView(Number(path.split('/')[2]))
+    } else if (path === '/library') {
+      nav('library')
+      await libraryView()
+    } else if (path === '/settings') {
+      nav('settings')
+      await settingsView()
+    }
+  } catch (e) {
+    console.error(e)
+    toast(String(e), true)
+  }
+}
+window.addEventListener('hashchange', route)
+
+const q = $('#q')
+const doSearch = debounce(() => {
+  const v = q.value.trim()
+  const target = `#/search?q=${encodeURIComponent(v)}`
+  if (location.hash.startsWith('#/search')) history.replaceState(null, '', target)
+  else history.pushState(null, '', target)
+  route()
+}, 220)
+q.addEventListener('input', doSearch)
+q.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    e.preventDefault()
+    $('.card', view)?.focus()
+  }
+  if (e.key === 'Escape') q.blur()
+})
+
+view.addEventListener('click', (e) => {
+  const play = e.target.closest('[data-play]')
+  if (play) {
+    e.preventDefault()
+    getDetails(Number(play.dataset.play)).then((m) => Player.play(m, '1', {}))
+    return
+  }
+  const resume = e.target.closest('[data-resume]')
+  if (resume && !e.ctrlKey) {
+    e.preventDefault()
+    getDetails(Number(resume.dataset.resume)).then((m) => Player.play(m, resume.dataset.ep, {}))
+  }
+})
+
+// ---------------------------------------------------------------- player
+const video = $('#video')
+const embed = $('#embed')
+const playerEl = $('#player')
+
+const Player = {
+  open: false,
+  hls: null,
+  media: null,
+  id: 0,
+  episode: '1',
+  episodes: [],
+  provider: null,
+  sources: [],
+  srcIdx: 0,
+  qIdx: 0,
+  failed: new Set(),
+  skip: null,
+  prefetched: false,
+  saveTimer: 0,
+  diskTimer: 0,
+  idleTimer: 0,
+  token: 0,
+  subIdx: -1,
+
+  async play(media, episode, { provider, episodes } = {}) {
+    const token = ++this.token
+    this.media = media
+    this.id = media.id
+    this.episode = String(episode)
+    this.episodes = episodes?.length ? episodes : this.episodes?.length && this.id === media.id ? this.episodes : []
+    this.failed = new Set()
+    this.prefetched = false
+    this.skip = null
+    this.show()
+    this.teardownMedia()
+    $('#p-show').textContent = titleOf(media)
+    $('#p-ep').textContent = `Episode ${this.episode}`
+    $('#p-srcinfo').textContent = ''
+    this.message('')
+    this.spinner(true)
+
+    const snap = await this.waitForSources(token)
+    if (token !== this.token) return
+    const order = this.providerOrder(snap, provider)
+    if (!order.length) {
+      this.spinner(false)
+      this.message('No working source found for this show. Try switching SUB/DUB or enabling more providers in Settings.')
+      return
+    }
+    for (const p of order) {
+      if (token !== this.token) return
+      if (await this.tryProvider(p, token)) return
+    }
+    if (token !== this.token) return
+    this.spinner(false)
+    this.message(`Couldn't load episode ${this.episode} from any provider.`)
+  },
+
+  async waitForSources(token) {
+    let snap = S.probes.get(this.id)
+    if (!snap || (!snap.best && !snap.done)) {
+      snap = await invoke('probe', { id: this.id }).catch(() => null)
+      if (snap) S.probes.set(this.id, snap)
+    }
+    const started = Date.now()
+    while (token === this.token && !(snap?.best || snap?.done) && Date.now() - started < 45000) {
+      this.message('Finding a working source…', true)
+      await new Promise((r) => setTimeout(r, 300))
+      snap = S.probes.get(this.id)
+    }
+    this.message('')
+    return snap
+  },
+
+  providerOrder(snap, preferred) {
+    // Sources are already ranked; ones whose stream check failed stay as a last resort.
+    const ok = (snap?.sources || []).filter((s) => s.state === 'ok' && s.playable !== false).map((s) => s.provider)
+    const doubtful = (snap?.sources || []).filter((s) => s.state === 'ok' && s.playable === false).map((s) => s.provider)
+    const order = [...ok, ...doubtful]
+    if (preferred && order.includes(preferred)) order.splice(order.indexOf(preferred), 1), order.unshift(preferred)
+    return order.filter((p) => !this.failed.has(p))
+  },
+
+  async tryProvider(provider, token) {
+    this.message(`Loading from ${provider}…`, true)
+    let sources
+    try {
+      sources = await invoke('streams', { id: this.id, provider, episode: this.episode })
+    } catch (e) {
+      console.warn(provider, e)
+      this.failed.add(provider)
+      return false
+    }
+    if (token !== this.token) return true
+    // Native players first, embeds last.
+    sources.sort((a, b) => (a.kind === 'iframe') - (b.kind === 'iframe'))
+    this.provider = provider
+    this.sources = sources
+    store.set(`provider:${this.id}`, provider)
+    if (!this.episodes.length) {
+      invoke('episodes', { id: this.id, provider })
+        .then((e) => (this.episodes = e))
+        .catch(() => {})
+    }
+    this.message('')
+    const resume = (this.media.progress || []).find((p) => String(p.episode) === this.episode)
+    const start = resume && resume.duration && resume.position / resume.duration < 0.95 ? resume.position : 0
+    this.load(0, 0, start)
+    return true
+  },
+
+  load(srcIdx, qIdx, startAt = 0) {
+    this.srcIdx = srcIdx
+    this.qIdx = qIdx
+    const src = this.sources[srcIdx]
+    const q = src.qualities[qIdx]
+    this.teardownMedia()
+    $('#p-srcinfo').innerHTML = `${esc(this.provider)} · ${esc(src.name)}<br>${esc(q.label)}`
+    $('[data-menu="quality"]').textContent = q.label
+    playerEl.classList.toggle('embed', src.kind === 'iframe')
+    this.spinner(src.kind !== 'iframe')
+    if (src.kind === 'iframe') {
+      video.classList.add('hidden')
+      embed.classList.remove('hidden')
+      embed.src = q.url
+      return
+    }
+    embed.classList.add('hidden')
+    video.classList.remove('hidden')
+    for (const t of src.subtitles) {
+      const tr = document.createElement('track')
+      tr.kind = 'subtitles'
+      tr.label = t.label
+      tr.srclang = (t.lang || 'en').slice(0, 2)
+      tr.src = t.url
+      video.append(tr)
+    }
+    const pickSub = () => {
+      const tracks = [...video.textTracks]
+      if (!tracks.length) return
+      let idx = this.subIdx >= 0 && this.subIdx < tracks.length ? this.subIdx : tracks.findIndex((t) => /^en|english/i.test(t.label || t.language))
+      tracks.forEach((t, i) => (t.mode = i === idx ? 'showing' : 'disabled'))
+      this.subIdx = idx
+    }
+    if (src.kind === 'hls' && window.Hls && Hls.isSupported()) {
+      const hls = new Hls({
+        enableWorker: true,
+        startPosition: startAt || -1,
+        maxBufferLength: 90,
+        maxMaxBufferLength: 600,
+        backBufferLength: 120,
+        fragLoadingMaxRetry: 4,
+        manifestLoadingMaxRetry: 2,
+        levelLoadingMaxRetry: 3,
+        capLevelToPlayerSize: false,
+      })
+      this.hls = hls
+      let recovered = false
+      hls.on(Hls.Events.ERROR, (_, data) => {
+        if (!data.fatal) return
+        if (data.type === Hls.ErrorTypes.MEDIA_ERROR && !recovered) {
+          recovered = true
+          hls.recoverMediaError()
+        } else this.failover(`${data.type}: ${data.details}`)
+      })
+      hls.on(Hls.Events.MANIFEST_PARSED, () => {
+        video.play().catch(() => {})
+        pickSub()
+      })
+      hls.loadSource(q.url)
+      hls.attachMedia(video)
+    } else {
+      video.src = q.url
+      video.addEventListener(
+        'loadedmetadata',
+        () => {
+          if (startAt) video.currentTime = startAt
+          video.play().catch(() => {})
+          pickSub()
+        },
+        { once: true }
+      )
+    }
+  },
+
+  failover(reason) {
+    console.warn('playback failed:', reason)
+    const src = this.sources[this.srcIdx]
+    const pos = video.currentTime || 0
+    if (src && this.qIdx + 1 < src.qualities.length) {
+      toast(`Quality ${src.qualities[this.qIdx].label} failed, trying ${src.qualities[this.qIdx + 1].label}`)
+      return this.load(this.srcIdx, this.qIdx + 1, pos)
+    }
+    if (this.srcIdx + 1 < this.sources.length) {
+      toast(`Switching to ${this.sources[this.srcIdx + 1].name}`)
+      return this.load(this.srcIdx + 1, 0, pos)
+    }
+    this.failed.add(this.provider)
+    const next = this.providerOrder(S.probes.get(this.id))[0]
+    if (next) {
+      toast(`${this.provider} failed, switching to ${next}`)
+      const token = ++this.token
+      this.tryProvider(next, token).then((ok) => !ok && this.failover('provider failed'))
+      return
+    }
+    this.spinner(false)
+    this.message('All sources failed for this episode.')
+  },
+
+  teardownMedia() {
+    if (this.hls) {
+      this.hls.destroy()
+      this.hls = null
+    }
+    video.pause()
+    video.removeAttribute('src')
+    for (const t of $$('track', video)) t.remove()
+    video.load()
+    embed.src = 'about:blank'
+  },
+
+  show() {
+    if (this.open) return
+    this.open = true
+    playerEl.classList.remove('hidden')
+    playerEl.focus()
+    this.saveTimer = setInterval(() => this.save(), 5000)
+    this.diskTimer = setInterval(() => this.updateDisk(), 2000)
+    this.poke()
+  },
+
+  async close() {
+    if (!this.open) return
+    this.token++
+    await this.save()
+    this.open = false
+    clearInterval(this.saveTimer)
+    clearInterval(this.diskTimer)
+    this.teardownMedia()
+    playerEl.classList.add('hidden')
+    $('#menu').classList.add('hidden')
+    $('#drawer').classList.add('hidden')
+    if (document.fullscreenElement) document.exitFullscreen().catch(() => {})
+    invoke('stop_downloads').catch(() => {})
+    // Refresh progress on the page underneath.
+    S.details.delete(this.id)
+    if (S.view?.id === this.id) showView(this.id)
+    else if (location.hash === '' || location.hash === '#/') homeView()
+  },
+
+  async save() {
+    if (!this.open || !video.duration || !isFinite(video.duration) || video.currentTime < 5) return
+    const progress = {
+      anilistId: this.id,
+      episode: this.episode,
+      position: video.currentTime,
+      duration: video.duration,
+      updatedAt: 0,
+      title: titleOf(this.media),
+      cover: coverOf(this.media),
+      provider: this.provider,
+    }
+    const list = (this.media.progress ||= [])
+    const i = list.findIndex((p) => String(p.episode) === this.episode)
+    if (i >= 0) list[i] = progress
+    else list.push(progress)
+    await invoke('save_progress', { progress }).catch(() => {})
+  },
+
+  async updateDisk() {
+    if (!this.open || this.sources[this.srcIdx]?.kind !== 'hls') {
+      $('#disk-note').textContent = ''
+      $('#bar-disk').style.width = '0'
+      return
+    }
+    const d = (await invoke('downloads').catch(() => [])).filter((x) => x.active).pop()
+    if (!d || !d.total) return
+    const pct = (d.done / d.total) * 100
+    $('#bar-disk').style.width = `${pct}%`
+    $('#disk-note').innerHTML = `<i class="ic ic-disk" style="width:14px;height:14px"></i>${pct >= 99.5 ? 'on disk' : `${pct.toFixed(0)}% on disk`} · ${fmtBytes(d.bytes)}`
+  },
+
+  epIndex() {
+    return this.episodes.findIndex((e) => String(e.number) === this.episode)
+  },
+
+  go(delta) {
+    const i = this.epIndex()
+    const next = this.episodes[i + delta]
+    if (next) this.play(this.media, next.number, { provider: this.provider, episodes: this.episodes })
+    else toast(delta > 0 ? 'This is the latest episode' : 'This is the first episode')
+  },
+
+  onProbe() {
+    if (!$('#menu').classList.contains('hidden') && $('#menu').dataset.kind === 'sources') this.menu('sources')
+  },
+
+  spinner(on) {
+    $('#p-spinner').classList.toggle('hidden', !on)
+  },
+
+  message(text, spinner = false) {
+    const el = $('#p-msg')
+    el.textContent = text
+    el.classList.toggle('hidden', !text || spinner)
+    if (spinner) this.spinner(true)
+  },
+
+  poke() {
+    playerEl.classList.remove('idle')
+    clearTimeout(this.idleTimer)
+    this.idleTimer = setTimeout(() => {
+      if (!video.paused && $('#menu').classList.contains('hidden') && $('#drawer').classList.contains('hidden')) playerEl.classList.add('idle')
+    }, 2600)
+  },
+
+  menu(kind) {
+    const m = $('#menu')
+    if (!m.classList.contains('hidden') && m.dataset.kind === kind && !this._refresh) {
+      m.classList.add('hidden')
+      return
+    }
+    m.dataset.kind = kind
+    const src = this.sources[this.srcIdx]
+    let html = ''
+    if (kind === 'quality' && src) {
+      html = `<div class="mh">Quality</div>${src.qualities
+        .map((q, i) => `<button data-q="${i}" class="${i === this.qIdx ? 'on' : ''}">${esc(q.label)}</button>`)
+        .join('')}`
+    } else if (kind === 'sources') {
+      const snap = S.probes.get(this.id)
+      html = `<div class="mh">${esc(this.provider)} streams</div>${this.sources
+        .map((s, i) => `<button data-s="${i}" class="${i === this.srcIdx ? 'on' : ''}">${esc(s.name)}<small>${esc(s.kind)}</small></button>`)
+        .join('')}<div class="mh">Providers</div>${(snap?.sources || [])
+        .filter((s) => s.state === 'ok')
+        .map(
+          (s) =>
+            `<button data-p="${esc(s.provider)}" class="${s.provider === this.provider ? 'on' : ''}"><span class="dot ${s.playable === false ? 'failed' : 'ok'}"></span>${esc(s.label)}<small>${s.latencyMs ?? ''} ms</small></button>`
+        )
+        .join('')}`
+    } else if (kind === 'subs') {
+      const tracks = [...video.textTracks]
+      html = `<div class="mh">Subtitles</div><button data-sub="-1" class="${this.subIdx < 0 ? 'on' : ''}">Off</button>${tracks
+        .map((t, i) => `<button data-sub="${i}" class="${i === this.subIdx ? 'on' : ''}">${esc(t.label || t.language || `Track ${i + 1}`)}</button>`)
+        .join('')}${tracks.length ? '' : '<div class="mh">None available (may be burned in)</div>'}`
+    } else if (kind === 'speed') {
+      html = `<div class="mh">Speed</div>${[0.5, 0.75, 1, 1.25, 1.5, 2]
+        .map((r) => `<button data-rate="${r}" class="${video.playbackRate === r ? 'on' : ''}">${r}×</button>`)
+        .join('')}`
+    }
+    m.innerHTML = html
+    m.classList.remove('hidden')
+  },
+
+  drawer() {
+    const d = $('#drawer')
+    if (!d.classList.contains('hidden')) return d.classList.add('hidden')
+    const prog = new Map((this.media.progress || []).map((p) => [String(p.episode), p]))
+    d.innerHTML = `<h3>Episodes</h3><div class="eps">${this.episodes
+      .map((e) => {
+        const p = prog.get(String(e.number))
+        const pct = p && p.duration ? Math.min(100, (p.position / p.duration) * 100) : 0
+        return `<div class="ep ${String(e.number) === this.episode ? 'current' : ''} ${pct > 90 ? 'watched' : ''}" data-ep="${esc(e.number)}" style="grid-template-columns:48px 1fr">
+        <div class="th">${esc(e.number)}</div><div><div class="tt">${esc(e.title || `Episode ${e.number}`)}</div></div>${pct ? `<span class="bar" style="width:${pct}%"></span>` : ''}</div>`
+      })
+      .join('')}</div>`
+    d.classList.remove('hidden')
+    $('.ep.current', d)?.scrollIntoView({ block: 'center' })
+  },
+
+  async fullscreen() {
+    try {
+      const w = T.window.getCurrentWindow()
+      await w.setFullscreen(!(await w.isFullscreen()))
+    } catch {
+      if (document.fullscreenElement) document.exitFullscreen()
+      else playerEl.requestFullscreen().catch(() => {})
+    }
+  },
+
+  async loadSkip() {
+    this.skip = null
+    const mal = this.media.idMal
+    if (!mal || !video.duration) return
+    try {
+      const r = await invoke('skip_times', { malId: mal, episode: this.episode, duration: video.duration })
+      this.skip = (r.results || []).map((x) => ({ type: x.skipType, start: x.interval.startTime, end: x.interval.endTime }))
+    } catch {}
+  },
+}
+
+// player wiring
+const playIcon = $('#ic-play')
+video.addEventListener('play', () => (playIcon.className = 'ic ic-pause'))
+video.addEventListener('pause', () => {
+  playIcon.className = 'ic ic-play'
+  Player.poke()
+  Player.save()
+})
+video.addEventListener('waiting', () => Player.spinner(true))
+video.addEventListener('playing', () => Player.spinner(false))
+video.addEventListener('canplay', () => Player.spinner(false))
+video.addEventListener('loadedmetadata', () => Player.loadSkip())
+video.addEventListener('error', () => {
+  if (Player.open && !Player.hls && video.getAttribute('src')) Player.failover(video.error?.message || 'media error')
+})
+video.addEventListener('ended', () => {
+  Player.save()
+  if (S.settings.autoplayNext) Player.go(1)
+})
+video.addEventListener('timeupdate', () => {
+  const d = video.duration || 0
+  const t = video.currentTime
+  $('#t-cur').textContent = fmtTime(t)
+  $('#t-dur').textContent = fmtTime(d)
+  const pct = d ? (t / d) * 100 : 0
+  $('#bar-played').style.width = `${pct}%`
+  $('#knob').style.left = `${pct}%`
+  if (video.buffered.length && d) {
+    let end = 0
+    for (let i = 0; i < video.buffered.length; i++) if (video.buffered.start(i) <= t + 1) end = Math.max(end, video.buffered.end(i))
+    $('#bar-buf').style.width = `${(end / d) * 100}%`
+  }
+  const seg = Player.skip?.find((s) => t >= s.start && t < s.end - 1)
+  const btn = $('#p-skip')
+  if (seg && S.settings.autoSkipIntro && seg.type === 'op') video.currentTime = seg.end
+  btn.classList.toggle('hidden', !seg)
+  if (seg) btn.textContent = seg.type === 'ed' ? 'Skip outro' : 'Skip intro'
+  btn.onclick = seg ? () => (video.currentTime = seg.end) : null
+  if (!Player.prefetched && d > 60 && t > d * 0.8) {
+    Player.prefetched = true
+    const next = Player.episodes[Player.epIndex() + 1]
+    if (next) invoke('prefetch_next', { id: Player.id, provider: Player.provider, episode: String(next.number) }).catch(() => {})
+  }
+})
+
+const volume = $('#volume')
+volume.value = store.get('volume', 1)
+video.volume = Number(volume.value)
+volume.addEventListener('input', () => {
+  video.volume = Number(volume.value)
+  video.muted = false
+  store.set('volume', video.volume)
+})
+video.addEventListener('volumechange', () => ($('#ic-vol').className = `ic ${video.muted || video.volume === 0 ? 'ic-mute' : 'ic-vol'}`))
+
+const seek = $('#seek')
+const seekAt = (e) => {
+  const r = seek.getBoundingClientRect()
+  return Math.max(0, Math.min(1, (e.clientX - r.left) / r.width))
+}
+seek.addEventListener('mousemove', (e) => {
+  const f = seekAt(e)
+  $('#seek-tip').style.left = `${f * 100}%`
+  $('#seek-tip').textContent = fmtTime(f * (video.duration || 0))
+})
+seek.addEventListener('mousedown', (e) => {
+  const move = (ev) => video.duration && (video.currentTime = seekAt(ev) * video.duration)
+  move(e)
+  const up = () => (window.removeEventListener('mousemove', move), window.removeEventListener('mouseup', up))
+  window.addEventListener('mousemove', move)
+  window.addEventListener('mouseup', up)
+})
+
+playerEl.addEventListener('mousemove', () => Player.poke())
+playerEl.addEventListener('click', (e) => {
+  const act = e.target.closest('[data-act]')?.dataset.act
+  const menu = e.target.closest('[data-menu]')?.dataset.menu
+  const m = $('#menu')
+  if (menu) return Player.menu(menu)
+  const item = e.target.closest('#menu button')
+  if (item) {
+    const d = item.dataset
+    if (d.q != null) Player.load(Player.srcIdx, Number(d.q), video.currentTime)
+    else if (d.s != null) Player.load(Number(d.s), 0, video.currentTime)
+    else if (d.p) {
+      const token = ++Player.token
+      Player.failed.delete(d.p)
+      Player.tryProvider(d.p, token)
+    } else if (d.sub != null) {
+      Player.subIdx = Number(d.sub)
+      ;[...video.textTracks].forEach((t, i) => (t.mode = i === Player.subIdx ? 'showing' : 'disabled'))
+    } else if (d.rate) {
+      video.playbackRate = Number(d.rate)
+      $('[data-menu="speed"]').textContent = `${d.rate}×`
+    }
+    m.classList.add('hidden')
+    return
+  }
+  const ep = e.target.closest('#drawer .ep')
+  if (ep) return Player.play(Player.media, ep.dataset.ep, { provider: Player.provider, episodes: Player.episodes })
+  if (!e.target.closest('.menu')) m.classList.add('hidden')
+  switch (act) {
+    case 'close':
+      return Player.close()
+    case 'play':
+      return video.paused ? video.play() : video.pause()
+    case 'next':
+      return Player.go(1)
+    case 'prev':
+      return Player.go(-1)
+    case 'mute':
+      video.muted = !video.muted
+      return
+    case 'fullscreen':
+      return Player.fullscreen()
+    case 'episodes':
+      return Player.drawer()
+  }
+  if (e.target === video) video.paused ? video.play() : video.pause()
+})
+video.addEventListener('dblclick', () => Player.fullscreen())
+
+// ---------------------------------------------------------------- keyboard
+document.addEventListener('keydown', (e) => {
+  const typing = ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName)
+  if (Player.open) {
+    if (typing && e.key !== 'Escape') return
+    Player.poke()
+    const k = e.key.toLowerCase()
+    const handled = {
+      ' ': () => (video.paused ? video.play() : video.pause()),
+      k: () => (video.paused ? video.play() : video.pause()),
+      arrowright: () => (video.currentTime += e.shiftKey ? 30 : 5),
+      arrowleft: () => (video.currentTime -= e.shiftKey ? 30 : 5),
+      l: () => (video.currentTime += 10),
+      j: () => (video.currentTime -= 10),
+      arrowup: () => ((video.volume = Math.min(1, video.volume + 0.05)), (volume.value = video.volume)),
+      arrowdown: () => ((video.volume = Math.max(0, video.volume - 0.05)), (volume.value = video.volume)),
+      m: () => (video.muted = !video.muted),
+      f: () => Player.fullscreen(),
+      n: () => Player.go(1),
+      p: () => Player.go(-1),
+      e: () => Player.drawer(),
+      c: () => Player.menu('subs'),
+      s: () => $('#p-skip').click(),
+      escape: async () => {
+        if (!$('#menu').classList.contains('hidden')) return $('#menu').classList.add('hidden')
+        if (!$('#drawer').classList.contains('hidden')) return $('#drawer').classList.add('hidden')
+        try {
+          const w = T.window.getCurrentWindow()
+          if (await w.isFullscreen()) return w.setFullscreen(false)
+        } catch {}
+        Player.close()
+      },
+    }[k]
+    if (handled) {
+      e.preventDefault()
+      handled()
+    } else if (/^[0-9]$/.test(k) && video.duration) {
+      video.currentTime = (Number(k) / 10) * video.duration
+    }
+    return
+  }
+  if (typing) return
+  if (e.key === '/' || (e.key === 'k' && e.ctrlKey)) {
+    e.preventDefault()
+    q.focus()
+    q.select()
+  } else if (e.key === 'Backspace' && location.hash.startsWith('#/anime/')) {
+    history.back()
+  }
+})
+
+// ---------------------------------------------------------------- boot
+;(async () => {
+  try {
+    S.boot = await invoke('boot')
+    S.settings = S.boot.settings
+  } catch (e) {
+    document.body.innerHTML = `<div class="empty">Failed to start: ${esc(e)}</div>`
+    return
+  }
+  route()
+})()

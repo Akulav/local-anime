@@ -1,0 +1,36 @@
+[package]
+name = "dango-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+rquickjs = { version = "0.9", features = ["full-async", "parallel", "macro"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "gzip", "brotli", "deflate", "zstd", "json", "stream", "cookies", "http2"] }
+axum = "0.8"
+url = "2"
+sha2 = "0.10"
+hmac = "0.12"
+aes = "0.8"
+cbc = { version = "0.1", features = ["alloc"] }
+base64 = "0.22"
+hex = "0.4"
+rusqlite = { version = "0.32", features = ["bundled"] }
+moka = { version = "0.12", features = ["future", "sync"] }
+futures = "0.3"
+bytes = "1"
+parking_lot = "0.12"
+directories = "5"
+rand = "0.8"
+regex = "1"
+percent-encoding = "2"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+tokio = { version = "1", features = ["full", "test-util"] }

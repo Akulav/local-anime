@@ -1,38 +1,12 @@
-# Node modules (all workspaces)
-node_modules/
+# Rust build output
+/target
 
-# Build output
-/client/dist
-/server/dist
-*.tsbuildinfo
+# Tauri generated schemas
+/app/gen
 
-/release-package/
-dango.zip
-package-lock.json
+# JS vendoring toolchain (outputs are committed)
+/tools/js-vendor/node_modules
 
-# Databases
-*.db
-server/.env
-server/google_tokens.json
-server/sync_manifest*.json
-.wrangler/
-worker/**/wrangler.toml
-!worker/**/wrangler.toml.example
-worker/**/.env
-!worker/**/.env.example
-
-# Android
-android-app/local.properties
-android-app/dango-debug.keystore
-android-app/.gradle/
-android-app/.kotlin/
-android-app/build/
-android-app/app/build/
-android-app/debs/
-/android-app/app/src/main/assets/payload/
-/android-app/app/src/main/assets/payload-old/
-/android-app/build-release.log
-/android-app/payload
-android-app/app/src/main/jniLibs/
-/android-app/__pycache__
-
+# Local data when running in portable mode
+/data
+portable
