@@ -310,9 +310,24 @@ async function showView(id) {
       const fb = new Map(fallbackEps().map((e) => [e.number, e.title]))
       v.episodes = eps.map((e) => ({ number: e.number, title: e.title || fb.get(e.number) || null }))
       renderEps()
+      queueDownloads(provider)
     } catch (e) {
       console.warn(e)
     }
+  }
+
+  // Download the episode you'd play next plus the following ones in the background.
+  const queueDownloads = (provider) => {
+    const n = S.settings.predownloadEpisodes || 0
+    if (!n || !v.episodes.length) return
+    let start = 0
+    if (last) {
+      const i = v.episodes.findIndex((e) => String(e.number) === String(last.episode))
+      const done = last.duration && last.position / last.duration > 0.9
+      if (i >= 0) start = done ? i + 1 : i
+    }
+    const episodes = v.episodes.slice(start, start + n).map((e) => String(e.number))
+    if (episodes.length) invoke('queue_downloads', { id, provider, episodes, title: titleOf(m) }).catch(() => {})
   }
 
   const renderSources = (snap) => {
@@ -377,6 +392,7 @@ async function libraryView() {
   setView({})
   const [lib, cont] = await Promise.all([invoke('library').catch(() => []), invoke('continue_watching').catch(() => [])])
   view.innerHTML = `
+    <div id="dl-section"></div>
     ${cont.length ? `<h2 class="row-title">Continue watching</h2><div class="row">${cont.map(continueCard).join('')}</div>` : ''}
     <h2 class="row-title">Library <small>${lib.length} shows</small></h2>
     ${
@@ -384,7 +400,52 @@ async function libraryView() {
         ? `<div class="grid">${lib.map((e) => card({ id: e.anilistId, title: e.title, cover: e.cover })).join('')}</div>`
         : `<div class="empty">Shows you add appear here.</div>`
     }`
+  const v = S.view
+  const render = async () => {
+    const list = (await invoke('downloads').catch(() => [])).filter((d) => d.label && d.active)
+    const el = $('#dl-section')
+    if (S.view !== v || !el) return
+    const hours = S.settings.cacheMaxAgeHours
+    el.innerHTML = list.length
+      ? `<h2 class="row-title">Downloads <small>removed ${hours}h after last use</small><span class="grow"></span>
+          <button class="btn small" id="dl-stop">Stop all</button></h2>
+        <div class="panel dl-list">${list
+          .map((d) => {
+            const pct = d.total ? Math.min(100, (d.done / d.total) * 100) : 0
+            const state = d.complete ? 'on disk' : d.playing ? 'playing' : `${pct.toFixed(0)}%`
+            return `<div class="dl"><div class="dl-l"><b>${esc(d.label)}</b><span>${state} · ${fmtBytes(d.bytes)}</span></div>
+              <div class="meter"><i style="width:${pct}%"></i></div></div>`
+          })
+          .join('')}</div>`
+      : ''
+    const stop = $('#dl-stop')
+    if (stop)
+      stop.onclick = async () => {
+        await invoke('stop_downloads')
+        toast('Downloads stopped')
+        render()
+      }
+  }
+  render()
+  const timer = setInterval(render, 2000)
+  v.leave = () => clearInterval(timer)
 }
+
+// Top-bar download indicator.
+setInterval(async () => {
+  const el = $('#status')
+  if (!S.boot || !el) return
+  const running = (await invoke('downloads').catch(() => [])).filter((d) => d.label && d.active && !d.complete)
+  if (!running.length) {
+    el.innerHTML = ''
+    return
+  }
+  const d = running.find((x) => x.playing) || running[0]
+  const pct = d.total ? (d.done / d.total) * 100 : 0
+  el.innerHTML = `<a class="chip" href="#/library" title="Background downloads"><i class="ic ic-disk" style="width:14px;height:14px"></i>${esc(
+    d.label
+  )} · ${pct.toFixed(0)}%${running.length > 1 ? ` · +${running.length - 1}` : ''}</a>`
+}, 3000)
 
 async function settingsView() {
   setView({})
@@ -417,7 +478,8 @@ async function settingsView() {
       ${num('downloadConcurrency', 'Parallel downloads', 'Segments fetched at the same time', 1, 12)}
       ${sw('prefetchNextEpisode', 'Prepare next episode', 'Resolve the next episode near the end of the current one')}
       ${num('cacheLimitMb', 'Cache size limit (MB)', 'Oldest files are removed above this size', 256, 524288)}
-      ${num('cacheMaxAgeHours', 'Keep cached video for (hours)', 'Older stream files are cleaned up automatically', 1, 2160)}
+      ${num('predownloadEpisodes', 'Episodes to pre-download', 'Opening a show downloads this many episodes from where you left off (0 = off)', 0, 12)}
+      ${num('cacheMaxAgeHours', 'Delete downloaded video after (hours)', 'Episodes are removed automatically this long after they were last used', 1, 2160)}
       <div class="meter"><i style="width:${pct}%"></i></div>
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><span class="chip">${fmtBytes(stats.bytes)} used · ${stats.files} files</span>
         <span class="chip">video ${fmtBytes(stats.segmentBytes + stats.fileBytes)}</span><span class="chip">images ${fmtBytes(stats.imageBytes)}</span><span class="grow"></span>
@@ -632,11 +694,12 @@ const Player = {
     return order.filter((p) => !this.failed.has(p))
   },
 
-  async tryProvider(provider, token) {
+  async tryProvider(provider, token, refresh = false) {
     this.message(`Loading from ${provider}…`, true)
+    this.refreshed = refresh
     let sources
     try {
-      sources = await invoke('streams', { id: this.id, provider, episode: this.episode })
+      sources = await invoke('streams', { id: this.id, provider, episode: this.episode, refresh })
     } catch (e) {
       console.warn(provider, e)
       this.failed.add(provider)
@@ -714,7 +777,10 @@ const Player = {
           hls.recoverMediaError()
         } else this.failover(`${data.type}: ${data.details}`)
       })
-      hls.on(Hls.Events.MANIFEST_PARSED, () => {
+      hls.on(Hls.Events.MANIFEST_PARSED, (_, data) => {
+        // Pin the best variant: it is what background downloads fetch, and with the disk
+        // cache there is no need for adaptive bitrate.
+        if (data.levels.length > 1) hls.currentLevel = data.levels.length - 1
         video.play().catch(() => {})
         pickSub()
       })
@@ -745,6 +811,12 @@ const Player = {
     if (this.srcIdx + 1 < this.sources.length) {
       toast(`Switching to ${this.sources[this.srcIdx + 1].name}`)
       return this.load(this.srcIdx + 1, 0, pos)
+    }
+    // Cached stream URLs may have expired: ask the provider once more before moving on.
+    if (!this.refreshed) {
+      const token = ++this.token
+      this.tryProvider(this.provider, token, true).then((ok) => !ok && this.failover('refresh failed'))
+      return
     }
     this.failed.add(this.provider)
     const next = this.providerOrder(S.probes.get(this.id))[0]
@@ -792,7 +864,7 @@ const Player = {
     $('#menu').classList.add('hidden')
     $('#drawer').classList.add('hidden')
     if (document.fullscreenElement) document.exitFullscreen().catch(() => {})
-    invoke('stop_downloads').catch(() => {})
+    // Downloads keep running in the background; the janitor expires them later.
     // Refresh progress on the page underneath.
     S.details.delete(this.id)
     if (S.view?.id === this.id) showView(this.id)
@@ -824,7 +896,7 @@ const Player = {
       $('#bar-disk').style.width = '0'
       return
     }
-    const d = (await invoke('downloads').catch(() => [])).filter((x) => x.active).pop()
+    const d = (await invoke('downloads').catch(() => [])).find((x) => x.active && x.playing && x.kind === 'hls')
     if (!d || !d.total) return
     const pct = (d.done / d.total) * 100
     $('#bar-disk').style.width = `${pct}%`

@@ -63,9 +63,12 @@ async fn main() -> anyhow::Result<()> {
         let eps = app.episodes(id, &s.provider).await?;
         let ep = eps.first().expect("no episodes").number.clone();
         let t = Instant::now();
-        match app.streams(id, &s.provider, &ep).await {
+        match app.streams(id, &s.provider, &ep, false).await {
             Ok(v) if v.iter().any(|x| x.kind != "iframe") => {
                 println!("streams from {} ep {ep} in {:?}:", s.provider, t.elapsed());
+                // What the show page does on open: queue the first episodes in the background.
+                let next: Vec<String> = eps.iter().take(3).map(|e| e.number.clone()).collect();
+                app.queue_downloads(id, s.provider.clone(), next, "e2e".into());
                 picked = Some(v);
                 break;
             }
@@ -82,9 +85,18 @@ async fn main() -> anyhow::Result<()> {
     let client = reqwest::Client::new();
     if src.kind == "hls" {
         let mut playlist = client.get(url).send().await?.text().await?;
-        // Descend into the first variant if this is a master playlist.
+        // Descend into the highest-bandwidth variant (what the player pins).
         if playlist.contains("#EXT-X-STREAM-INF") {
-            let child = playlist.lines().find(|l| l.starts_with("http")).unwrap().to_string();
+            let lines: Vec<&str> = playlist.lines().collect();
+            let bw = |l: &str| {
+                l.split("BANDWIDTH=").nth(1).and_then(|r| r.split(',').next()).and_then(|n| n.parse::<u64>().ok())
+            };
+            let child = lines
+                .windows(2)
+                .filter(|w| w[0].starts_with("#EXT-X-STREAM-INF"))
+                .max_by_key(|w| bw(w[0]).unwrap_or(0))
+                .map(|w| w[1].to_string())
+                .unwrap();
             playlist = client.get(&child).send().await?.text().await?;
         }
         let seg = playlist.lines().find(|l| l.starts_with("http")).expect("no segments").to_string();
@@ -94,9 +106,20 @@ async fn main() -> anyhow::Result<()> {
         let t = Instant::now();
         let again = client.get(&seg).send().await?.bytes().await?;
         println!("cached segment: {} bytes in {:?}", again.len(), t.elapsed());
-        tokio::time::sleep(Duration::from_secs(8)).await;
-        for d in app.downloads() {
-            println!("background download: {}/{} segments, {} KB", d.done, d.total, d.bytes / 1024);
+        for round in 0..3 {
+            tokio::time::sleep(Duration::from_secs(8)).await;
+            println!("downloads after {}s:", (round + 1) * 8);
+            for d in app.downloads() {
+                println!(
+                    "  {:<18} {:>4}/{:<4} {:>7} KB playing={} complete={}",
+                    d.label.as_deref().unwrap_or("(player)"),
+                    d.done,
+                    d.total,
+                    d.bytes / 1024,
+                    d.playing,
+                    d.complete
+                );
+            }
         }
     } else {
         let r = client.get(url).header("range", "bytes=0-65535").send().await?;

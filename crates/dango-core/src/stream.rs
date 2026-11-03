@@ -89,27 +89,51 @@ pub fn sha_key(s: &str) -> String {
 #[serde(rename_all = "camelCase")]
 pub struct DownloadStatus {
     pub id: String,
-    pub total: usize,
-    pub done: usize,
-    pub playhead: usize,
+    pub label: Option<String>,
+    /// "hls" or "file".
+    pub kind: &'static str,
+    /// HLS: segments; file: bytes.
+    pub total: u64,
+    pub done: u64,
     pub bytes: u64,
+    /// The player is reading from this download right now.
+    pub playing: bool,
+    pub complete: bool,
     pub active: bool,
 }
 
+/// A player request within this window marks a download as the one being watched.
+const FOREGROUND_WINDOW: Duration = Duration::from_secs(20);
+const MAX_JOBS: usize = 16;
+
 struct HlsJob {
     id: String,
+    label: Mutex<Option<String>>,
     segs: Vec<Upstream>,
     done: Vec<AtomicBool>,
     claimed: Vec<AtomicBool>,
     playhead: AtomicUsize,
     bytes: AtomicU64,
     cancelled: AtomicBool,
+    last_play: Mutex<Option<Instant>>,
     wake: Notify,
 }
 
 impl HlsJob {
     fn done_count(&self) -> usize {
         self.done.iter().filter(|d| d.load(Ordering::Relaxed)).count()
+    }
+
+    fn complete(&self) -> bool {
+        self.done_count() == self.segs.len()
+    }
+
+    fn running(&self) -> bool {
+        !self.cancelled.load(Ordering::Relaxed) && !self.complete()
+    }
+
+    fn playing(&self) -> bool {
+        self.last_play.lock().is_some_and(|t| t.elapsed() < FOREGROUND_WINDOW)
     }
 
     fn next(&self, window: Option<usize>) -> Option<usize> {
@@ -123,6 +147,7 @@ impl HlsJob {
 }
 
 struct FileJob {
+    label: Mutex<Option<String>>,
     part: PathBuf,
     done_path: PathBuf,
     len: AtomicU64,
@@ -133,6 +158,15 @@ struct FileJob {
 
 type SegFuture = Shared<BoxFuture<'static, Result<(PathBuf, u64), String>>>;
 
+/// A rewritten playlist. Media playlists keep their segment list so a cache hit can
+/// re-create the background download if it was dropped.
+struct Playlist {
+    text: String,
+    segs: Option<Vec<Upstream>>,
+    /// Master playlists: local URLs of the variants with their bandwidth.
+    variants: Vec<(u64, String)>,
+}
+
 pub struct StreamInner {
     http: Http,
     providers: Arc<Providers>,
@@ -142,8 +176,8 @@ pub struct StreamInner {
     img_dir: PathBuf,
     token: String,
     base: RwLock<String>,
-    playlists_vod: moka::sync::Cache<String, Arc<String>>,
-    playlists_live: moka::sync::Cache<String, Arc<String>>,
+    playlists_vod: moka::sync::Cache<String, Arc<Playlist>>,
+    playlists_live: moka::sync::Cache<String, Arc<Playlist>>,
     subs: moka::sync::Cache<String, Arc<String>>,
     inflight: Mutex<HashMap<String, SegFuture>>,
     jobs: Mutex<Vec<Arc<HlsJob>>>,
@@ -411,9 +445,16 @@ impl StreamInner {
 
     // ---------------- HLS ----------------
 
-    async fn playlist(self: &Arc<Self>, spec: Upstream) -> Result<Arc<String>> {
-        let key = sha_key(&serde_json::to_string(&spec)?);
+    fn job_id(spec: &Upstream) -> String {
+        sha_key(&serde_json::to_string(spec).unwrap_or_default())
+    }
+
+    async fn playlist(self: &Arc<Self>, spec: Upstream) -> Result<Arc<Playlist>> {
+        let key = Self::job_id(&spec);
         if let Some(p) = self.playlists_vod.get(&key).or_else(|| self.playlists_live.get(&key)) {
+            if let Some(segs) = &p.segs {
+                self.register_job(&key, segs.clone());
+            }
             return Ok(p);
         }
         let resp = self.fetch(&spec, None, Duration::from_secs(20)).await?;
@@ -423,17 +464,63 @@ impl StreamInner {
         if !body.trim_start().starts_with("#EXTM3U") {
             bail!("upstream did not return a playlist");
         }
-        let (text, vod) = self.rewrite(body, &final_url, &spec, &key)?;
-        let text = Arc::new(text);
-        if vod {
-            self.playlists_vod.insert(key, text.clone());
-        } else {
-            self.playlists_live.insert(key, text.clone());
+        let (playlist, vod) = self.rewrite(body, &final_url, &spec, &key)?;
+        let playlist = Arc::new(playlist);
+        if let Some(segs) = &playlist.segs {
+            self.register_job(&key, segs.clone());
         }
-        Ok(text)
+        if vod {
+            self.playlists_vod.insert(key, playlist.clone());
+        } else {
+            self.playlists_live.insert(key, playlist.clone());
+        }
+        Ok(playlist)
     }
 
-    fn rewrite(self: &Arc<Self>, body: &str, final_url: &str, spec: &Upstream, job_id: &str) -> Result<(String, bool)> {
+    /// Starts downloading a whole episode in the background without playing it.
+    /// For HLS the highest-bandwidth variant is chosen, which is also what the player pins.
+    pub async fn prefetch(self: &Arc<Self>, local_url: &str, label: String) -> Result<()> {
+        let (kind, spec) = self.parse_local(local_url).ok_or_else(|| anyhow!("not a local stream url"))?;
+        match kind.as_str() {
+            "hls" => {
+                let mut pl = self.playlist(spec.clone()).await?;
+                let mut id = Self::job_id(&spec);
+                if let Some((_, best)) = pl.variants.iter().max_by_key(|(bw, _)| *bw).cloned() {
+                    let (_, child) = self.parse_local(&best).ok_or_else(|| anyhow!("bad variant url"))?;
+                    id = Self::job_id(&child);
+                    pl = self.playlist(child).await?;
+                }
+                if pl.segs.is_none() {
+                    bail!("live or empty playlist");
+                }
+                if let Some(job) = self.jobs.lock().iter().find(|j| j.id == id) {
+                    *job.label.lock() = Some(label);
+                }
+                Ok(())
+            }
+            "file" => {
+                let job = self.file_job(&spec);
+                *job.label.lock() = Some(label);
+                Ok(())
+            }
+            _ => bail!("unsupported stream kind {kind}"),
+        }
+    }
+
+    /// Splits a URL produced by this server into its kind and upstream spec.
+    pub fn parse_local(&self, url: &str) -> Option<(String, Upstream)> {
+        let rest = url.strip_prefix(self.base.read().as_str())?.trim_start_matches('/');
+        let (kind, data) = rest.split_once('/')?;
+        Some((kind.to_string(), Upstream::decode(data.split('?').next()?)?))
+    }
+
+    fn rewrite(
+        self: &Arc<Self>,
+        body: &str,
+        final_url: &str,
+        spec: &Upstream,
+        job_id: &str,
+    ) -> Result<(Playlist, bool)> {
         let base = url::Url::parse(final_url)?;
         let is_master = body.contains("#EXT-X-STREAM-INF");
         let pinned;
@@ -447,7 +534,10 @@ impl StreamInner {
         let abs = |u: &str| base.join(u.trim()).map(|x| x.to_string()).unwrap_or_else(|_| u.to_string());
         let uri_re = regex::Regex::new(r#"URI="([^"]+)""#).unwrap();
         let vod = body.contains("#EXT-X-ENDLIST") || body.contains("#EXT-X-PLAYLIST-TYPE:VOD");
+        let bw_re = regex::Regex::new(r"BANDWIDTH=(\d+)").unwrap();
         let mut segs: Vec<Upstream> = Vec::new();
+        let mut variants: Vec<(u64, String)> = Vec::new();
+        let mut pending_bw: Option<u64> = None;
         let mut out = String::with_capacity(body.len() * 2);
         for line in body.lines() {
             let t = line.trim();
@@ -456,6 +546,9 @@ impl StreamInner {
                 continue;
             }
             if t.starts_with('#') {
+                if t.starts_with("#EXT-X-STREAM-INF") {
+                    pending_bw = Some(bw_re.captures(t).and_then(|c| c[1].parse().ok()).unwrap_or(0));
+                }
                 let replaced = uri_re.replace_all(t, |c: &regex::Captures| {
                     let child = spec.child(abs(&c[1]));
                     let link = if is_master || t.starts_with("#EXT-X-MEDIA") {
@@ -471,7 +564,9 @@ impl StreamInner {
             }
             let child = spec.child(abs(t));
             if is_master {
-                out.push_str(&self.hls_url(&child));
+                let link = self.hls_url(&child);
+                variants.push((pending_bw.take().unwrap_or(0), link.clone()));
+                out.push_str(&link);
             } else {
                 let i = segs.len();
                 out.push_str(&format!("{}?j={job_id}&i={i}", self.url("seg", &child, "")));
@@ -479,34 +574,36 @@ impl StreamInner {
             }
             out.push('\n');
         }
-        if !is_master && vod && !segs.is_empty() {
-            self.register_job(job_id, segs);
-        }
-        Ok((out, vod || is_master))
+        let segs = (!is_master && vod && !segs.is_empty()).then_some(segs);
+        Ok((Playlist { text: out, segs, variants }, vod || is_master))
     }
 
+    /// Adds a download job (or keeps the existing one). Jobs keep running after the player
+    /// stops reading them; the oldest finished ones are dropped from the list first.
     fn register_job(self: &Arc<Self>, id: &str, segs: Vec<Upstream>) {
         let mut jobs = self.jobs.lock();
-        if let Some(pos) = jobs.iter().position(|j| j.id == id && !j.cancelled.load(Ordering::Relaxed)) {
-            let j = jobs.remove(pos);
-            jobs.push(j);
+        if jobs.iter().any(|j| j.id == id && !j.cancelled.load(Ordering::Relaxed)) {
             return;
         }
+        jobs.retain(|j| j.id != id);
         let n = segs.len();
         let job = Arc::new(HlsJob {
             id: id.to_string(),
+            label: Mutex::new(None),
             done: (0..n).map(|_| AtomicBool::new(false)).collect(),
             claimed: (0..n).map(|_| AtomicBool::new(false)).collect(),
             segs,
             playhead: AtomicUsize::new(0),
             bytes: AtomicU64::new(0),
             cancelled: AtomicBool::new(false),
+            last_play: Mutex::new(None),
             wake: Notify::new(),
         });
         jobs.push(job.clone());
-        // Only the most recent playlists keep downloading (video + audio + one previous).
-        while jobs.len() > 3 {
-            let old = jobs.remove(0);
+        while jobs.len() > MAX_JOBS {
+            let victim = jobs.iter().position(|j| !j.running()).or_else(|| jobs.iter().position(|j| !j.playing()));
+            let Some(pos) = victim else { break };
+            let old = jobs.remove(pos);
             old.cancelled.store(true, Ordering::Relaxed);
             old.wake.notify_waiters();
         }
@@ -519,14 +616,36 @@ impl StreamInner {
         }
     }
 
+    /// Background jobs wait while the player is downloading something else, and run one at a
+    /// time in the order they were queued.
+    fn should_yield(&self, job: &HlsJob) -> bool {
+        if job.playing() {
+            return false;
+        }
+        let jobs = self.jobs.lock();
+        if jobs.iter().any(|j| j.id != job.id && j.playing() && j.running()) {
+            return true;
+        }
+        let first_background = jobs.iter().find(|j| !j.playing() && j.running());
+        first_background.is_some_and(|j| j.id != job.id)
+    }
+
     async fn job_worker(self: Arc<Self>, job: Arc<HlsJob>) {
         loop {
             if job.cancelled.load(Ordering::Relaxed) {
                 return;
             }
+            if self.should_yield(&job) {
+                let _ = tokio::time::timeout(Duration::from_secs(1), job.wake.notified()).await;
+                continue;
+            }
             let window = (!self.settings.read().download_ahead).then_some(8);
             let Some(i) = job.next(window) else {
-                if job.done_count() == job.segs.len() {
+                if job.complete() {
+                    // Let queued background jobs start right away.
+                    for j in self.jobs.lock().iter() {
+                        j.wake.notify_waiters();
+                    }
                     return;
                 }
                 let _ = tokio::time::timeout(Duration::from_secs(3), job.wake.notified()).await;
@@ -599,17 +718,27 @@ impl StreamInner {
         q: &HashMap<String, String>,
         headers: &HeaderMap,
     ) -> Response<Body> {
-        if let (Some(j), Some(i)) = (q.get("j"), q.get("i").and_then(|i| i.parse::<usize>().ok())) {
-            let job = self.jobs.lock().iter().find(|x| &x.id == j).cloned();
-            if let Some(job) = job {
-                job.playhead.store(i, Ordering::Relaxed);
-                job.wake.notify_waiters();
+        let job_ref = match (q.get("j"), q.get("i").and_then(|i| i.parse::<usize>().ok())) {
+            (Some(j), Some(i)) => self.jobs.lock().iter().find(|x| &x.id == j).cloned().map(|job| (job, i)),
+            _ => None,
+        };
+        if let Some((job, i)) = &job_ref {
+            job.playhead.store(*i, Ordering::Relaxed);
+            *job.last_play.lock() = Some(Instant::now());
+            // Wake everything: this job may resume, others may need to yield.
+            for j in self.jobs.lock().iter() {
+                j.wake.notify_waiters();
             }
         }
-        let (path, _) = match self.segment(&spec).await {
+        let (path, size) = match self.segment(&spec).await {
             Ok(x) => x,
             Err(e) => return text_response(StatusCode::BAD_GATEWAY, e),
         };
+        if let Some((job, i)) = job_ref {
+            if i < job.done.len() && !job.done[i].swap(true, Ordering::Relaxed) {
+                job.bytes.fetch_add(size, Ordering::Relaxed);
+            }
+        }
         let data = match tokio::fs::read(&path).await {
             Ok(d) => d,
             Err(e) => return text_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
@@ -652,6 +781,7 @@ impl StreamInner {
         }
         let (tx, _) = watch::channel(0u64);
         let job = Arc::new(FileJob {
+            label: Mutex::new(None),
             part: self.file_dir.join(format!("{key}.part")),
             done_path: self.file_dir.join(format!("{key}.bin")),
             len: AtomicU64::new(0),
@@ -908,21 +1038,41 @@ impl StreamInner {
     }
 
     pub fn downloads(&self) -> Vec<DownloadStatus> {
-        self.jobs
+        let mut out: Vec<DownloadStatus> = self
+            .jobs
             .lock()
             .iter()
             .map(|j| DownloadStatus {
                 id: j.id.clone(),
-                total: j.segs.len(),
-                done: j.done_count(),
-                playhead: j.playhead.load(Ordering::Relaxed),
+                label: j.label.lock().clone(),
+                kind: "hls",
+                total: j.segs.len() as u64,
+                done: j.done_count() as u64,
                 bytes: j.bytes.load(Ordering::Relaxed),
+                playing: j.playing(),
+                complete: j.complete(),
                 active: !j.cancelled.load(Ordering::Relaxed),
             })
-            .collect()
+            .collect();
+        for (id, f) in self.files.lock().iter() {
+            let len = f.len.load(Ordering::Relaxed);
+            let water = *f.water.borrow();
+            out.push(DownloadStatus {
+                id: id.clone(),
+                label: f.label.lock().clone(),
+                kind: "file",
+                total: if len == u64::MAX { 0 } else { len },
+                done: water,
+                bytes: water,
+                playing: false,
+                complete: f.complete.load(Ordering::Relaxed),
+                active: !f.failed.load(Ordering::Relaxed),
+            });
+        }
+        out
     }
 
-    /// Stops background downloads (e.g. when the player closes).
+    /// Cancels every download (manual "stop all").
     pub fn stop_downloads(&self) {
         for j in self.jobs.lock().drain(..) {
             j.cancelled.store(true, Ordering::Relaxed);
@@ -1016,11 +1166,11 @@ async fn handle(
     }
     match kind.as_str() {
         "hls" => match inner.playlist(spec).await {
-            Ok(text) => cors(
+            Ok(pl) => cors(
                 Response::builder()
                     .header(header::CONTENT_TYPE, "application/vnd.apple.mpegurl")
                     .header(header::CACHE_CONTROL, "no-cache")
-                    .body(Body::from(text.to_string()))
+                    .body(Body::from(pl.text.clone()))
                     .unwrap(),
             ),
             Err(e) => text_response(StatusCode::BAD_GATEWAY, format!("{e:#}")),
@@ -1064,7 +1214,7 @@ impl StreamServer {
             base: RwLock::new(String::new()),
             playlists_vod: moka::sync::Cache::builder()
                 .max_capacity(500)
-                .time_to_live(Duration::from_secs(1800))
+                .time_to_live(Duration::from_secs(3 * 3600))
                 .build(),
             playlists_live: moka::sync::Cache::builder().max_capacity(200).time_to_live(Duration::from_secs(3)).build(),
             subs: moka::sync::Cache::builder().max_capacity(200).time_to_live(Duration::from_secs(3600)).build(),

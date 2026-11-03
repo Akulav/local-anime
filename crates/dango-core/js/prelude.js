@@ -377,7 +377,7 @@
       k = String(k).toLowerCase()
       const vals = this._list.filter(([x]) => x === k).map(([, v]) => v)
       if (!vals.length) return null
-      return k === 'set-cookie' ? vals.join(', ') : vals.join(', ')
+      return vals.join(', ')
     }
     getSetCookie() {
       return this._list.filter(([x]) => x === 'set-cookie').map(([, v]) => v)

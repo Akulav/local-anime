@@ -197,6 +197,14 @@ h2.row-title small { font-size: 12px; color: var(--dim); font-weight: 500; }
 .eps.compact .ep .th, .eps.compact .ep .tt { display: none; }
 .eps.compact .ep .n { font-size: 14px; }
 
+/* ---------- downloads ---------- */
+.dl-list { display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px; }
+.dl { display: grid; grid-template-columns: minmax(0, 1fr) 240px; gap: 16px; align-items: center; padding: 6px 4px; }
+.dl-l b { display: block; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dl-l span { color: var(--dim); font-size: 12px; }
+.dl .meter { margin: 0; }
+.status .chip { cursor: pointer; }
+
 /* ---------- settings ---------- */
 .settings { max-width: 860px; display: flex; flex-direction: column; gap: 18px; }
 .settings h1 { font-size: 26px; margin-bottom: 4px; }

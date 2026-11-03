@@ -52,15 +52,26 @@ async fn episodes(d: State<'_, Arc<Dango>>, id: i64, provider: String) -> Res<Va
 }
 
 #[tauri::command]
-async fn streams(d: State<'_, Arc<Dango>>, id: i64, provider: String, episode: String) -> Res<Value> {
+async fn streams(
+    d: State<'_, Arc<Dango>>,
+    id: i64,
+    provider: String,
+    episode: String,
+    refresh: Option<bool>,
+) -> Res<Value> {
     let d = d.inner().clone();
-    let s = d.streams(id, &provider, &episode).await.map_err(err)?;
+    let s = d.streams(id, &provider, &episode, refresh.unwrap_or(false)).await.map_err(err)?;
     Ok(serde_json::to_value(s).unwrap_or_default())
 }
 
 #[tauri::command]
 fn prefetch_next(d: State<'_, Arc<Dango>>, id: i64, provider: String, episode: String) {
     d.inner().prefetch_next(id, provider, episode);
+}
+
+#[tauri::command]
+fn queue_downloads(d: State<'_, Arc<Dango>>, id: i64, provider: String, episodes: Vec<String>, title: String) {
+    d.inner().queue_downloads(id, provider, episodes, title);
 }
 
 #[tauri::command]
@@ -177,6 +188,7 @@ fn main() {
             episodes,
             streams,
             prefetch_next,
+            queue_downloads,
             stop_downloads,
             downloads,
             skip_times,

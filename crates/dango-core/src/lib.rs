@@ -66,6 +66,9 @@ pub struct Dango {
     pub stream: Arc<StreamInner>,
     pub resolver: Arc<Resolver>,
     pub http: Http,
+    streams_cache: moka::sync::Cache<String, Arc<Vec<PlayableSource>>>,
+    /// Episodes already handed to the background downloader (key -> when).
+    queued: parking_lot::Mutex<std::collections::HashMap<String, std::time::Instant>>,
 }
 
 const IMAGE_KEYS: [&str; 5] = ["extraLarge", "large", "medium", "bannerImage", "thumbnail"];
@@ -85,7 +88,21 @@ impl Dango {
         let server = StreamServer::start(&paths.cache, http.clone(), providers.clone(), settings.clone()).await?;
         let stream = server.inner.clone();
         let resolver = Resolver::new(providers.clone(), store.clone(), stream.clone(), settings.clone());
-        let me = Arc::new(Self { paths, store, settings, anilist, providers, stream, resolver, http });
+        let me = Arc::new(Self {
+            paths,
+            store,
+            settings,
+            anilist,
+            providers,
+            stream,
+            resolver,
+            http,
+            streams_cache: moka::sync::Cache::builder()
+                .max_capacity(500)
+                .time_to_live(Duration::from_secs(90 * 60))
+                .build(),
+            queued: parking_lot::Mutex::new(std::collections::HashMap::new()),
+        });
         me.spawn_background();
         Ok(me)
     }
@@ -231,9 +248,25 @@ impl Dango {
         self.resolver.episodes(&t, provider).await
     }
 
-    pub async fn streams(self: &Arc<Self>, id: i64, provider: &str, episode: &str) -> Result<Vec<PlayableSource>> {
+    /// Playable sources for an episode. Results are cached so the player gets the same
+    /// (often signed) URLs a background download already fetched; `refresh` bypasses that.
+    pub async fn streams(
+        self: &Arc<Self>,
+        id: i64,
+        provider: &str,
+        episode: &str,
+        refresh: bool,
+    ) -> Result<Vec<PlayableSource>> {
+        let key = format!("{id}:{provider}:{episode}:{}", self.settings.read().mode);
+        if !refresh {
+            if let Some(v) = self.streams_cache.get(&key) {
+                return Ok((*v).clone());
+            }
+        }
         let t = self.titles(id).await?;
-        self.resolver.streams(&t, provider, episode).await
+        let v = self.resolver.streams(&t, provider, episode).await?;
+        self.streams_cache.insert(key, Arc::new(v.clone()));
+        Ok(v)
     }
 
     /// Resolves the next episode's sources ahead of time (called near the end of playback).
@@ -243,7 +276,47 @@ impl Dango {
         }
         let me = self.clone();
         tokio::spawn(async move {
-            let _ = me.streams(id, &provider, &episode).await;
+            let _ = me.streams(id, &provider, &episode, false).await;
+        });
+    }
+
+    /// Downloads whole episodes in the background (one at a time, paused while the player
+    /// fetches something else). Downloads keep going after the player closes; the janitor
+    /// removes them once they exceed the cache age/size limits.
+    pub fn queue_downloads(self: &Arc<Self>, id: i64, provider: String, episodes: Vec<String>, title: String) {
+        let mode = self.settings.read().mode.clone();
+        let fresh: Vec<String> = {
+            let mut q = self.queued.lock();
+            q.retain(|_, t| t.elapsed() < Duration::from_secs(6 * 3600));
+            episodes
+                .into_iter()
+                .filter(|ep| q.insert(format!("{id}:{provider}:{ep}:{mode}"), std::time::Instant::now()).is_none())
+                .collect()
+        };
+        if fresh.is_empty() {
+            return;
+        }
+        let me = self.clone();
+        tokio::spawn(async move {
+            for ep in fresh {
+                let label = format!("{title} · EP {ep}");
+                let res = async {
+                    let mut sources = me.streams(id, &provider, &ep, false).await?;
+                    // Same choice the player makes: native sources first, first quality.
+                    sources.sort_by_key(|s| s.kind == "iframe");
+                    let src = sources.into_iter().find(|s| s.kind != "iframe").ok_or_else(|| anyhow!("embed only"))?;
+                    let url = src.qualities.first().map(|q| q.url.clone()).ok_or_else(|| anyhow!("no qualities"))?;
+                    me.stream.prefetch(&url, label.clone()).await
+                }
+                .await;
+                match res {
+                    Ok(()) => tracing::info!("queued download: {label}"),
+                    Err(e) => {
+                        tracing::info!("cannot pre-download {label}: {e:#}");
+                        me.queued.lock().remove(&format!("{id}:{provider}:{ep}:{mode}"));
+                    }
+                }
+            }
         });
     }
 
@@ -352,15 +425,6 @@ impl Dango {
         let dir = self.paths.cache.clone();
         let busy = self.stream.busy_files();
         tokio::task::spawn_blocking(move || janitor::clear(&dir, images, &busy)).await.unwrap_or_default()
-    }
-
-    pub fn stream_addr(&self) -> Result<String> {
-        self.stream
-            .img_url("https://x")
-            .split("/s/")
-            .next()
-            .map(str::to_string)
-            .ok_or_else(|| anyhow!("no stream server"))
     }
 }
 

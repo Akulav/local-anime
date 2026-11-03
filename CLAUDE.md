@@ -78,7 +78,16 @@ cd app && npx @tauri-apps/cli@2 build                # installers (nsis | appima
    are content-addressed files under `cache/segments/xx/<sha>`, and concurrent requests for the same
    segment share one download. MP4 uses `FileJob`: a sequential download to `.part` with a watch
    channel watermark. Ranges below the watermark stream from disk, far seeks pass through.
-7. **UI failover** (`app.js` `Player.failover`): next quality → next stream → next provider (in rank
+7. **Background downloads** (`Dango::queue_downloads`, called by the show page with the resume
+   episode + `predownloadEpisodes`): resolves streams, picks the same source and quality as the
+   player, and calls `StreamInner::prefetch`. For HLS masters this picks the highest-BANDWIDTH
+   variant (the player pins `hls.currentLevel` to the top level, so both hit the same job/segments).
+   `Dango::streams` caches results for 90 minutes, so the player gets the same signed URLs the
+   prefetch used. Jobs are never cancelled when the player closes. A job the player requested
+   within 20 s is "playing" and takes priority, and other jobs run one at a time in queue order
+   (`should_yield`). At most 16 jobs are kept (finished ones dropped first). Downloaded files are
+   removed by the janitor after `cacheMaxAgeHours` (48 h default) since last access.
+8. **UI failover** (`app.js` `Player.failover`): next quality → next stream → next provider (in rank
    order), keeping the playback position.
 
 Upstream headers: the spec's referer/origin/ua/cookie, then the registry proxy rule matched by host
