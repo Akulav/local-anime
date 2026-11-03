@@ -398,7 +398,23 @@ impl Dango {
 
 /// Installs a tracing subscriber honouring `RUST_LOG` (default `info` for dango crates).
 pub fn init_logging() {
+    init_logging_to(None);
+}
+
+/// Like [`init_logging`], and also appends to `file` (the desktop app has no console in release).
+/// The file is truncated once it passes 5 MB.
+pub fn init_logging_to(file: Option<&Path>) {
+    use tracing_subscriber::fmt::writer::MakeWriterExt;
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn,dango=info,dango_core=info"));
-    let _ = tracing_subscriber::fmt().with_env_filter(filter).with_target(false).try_init();
+    let log = file.and_then(|p| {
+        let _ = p.parent().map(std::fs::create_dir_all);
+        let big = std::fs::metadata(p).map(|m| m.len() > 5 << 20).unwrap_or(false);
+        std::fs::OpenOptions::new().create(true).append(!big).write(true).truncate(big).open(p).ok()
+    });
+    let builder = tracing_subscriber::fmt().with_env_filter(filter).with_target(false);
+    let _ = match log {
+        Some(f) => builder.with_ansi(false).with_writer(std::io::stdout.and(std::sync::Mutex::new(f))).try_init(),
+        None => builder.try_init(),
+    };
 }

@@ -221,7 +221,11 @@ fn install_crash_log() {
 }
 
 fn main() {
-    dango_core::init_logging();
+    match Paths::resolve() {
+        Ok(p) => dango_core::init_logging_to(Some(&p.data.join("dango.log"))),
+        Err(_) => dango_core::init_logging(),
+    }
+    tracing::info!("dango {} starting on {}", dango_core::VERSION, std::env::consts::OS);
     install_crash_log();
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
