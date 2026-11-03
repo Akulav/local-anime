@@ -3,6 +3,7 @@
 
 use std::sync::Arc;
 
+use dango_core::resolver::Subtitle;
 use dango_core::settings::Settings;
 use dango_core::store::Progress;
 use dango_core::{Dango, Paths};
@@ -64,24 +65,67 @@ async fn streams(
     Ok(serde_json::to_value(s).unwrap_or_default())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn prefetch_next(d: State<'_, Arc<Dango>>, id: i64, provider: String, episode: String) {
     d.inner().prefetch_next(id, provider, episode);
 }
 
-#[tauri::command]
-fn queue_downloads(d: State<'_, Arc<Dango>>, id: i64, provider: String, episodes: Vec<String>, title: String) {
-    d.inner().queue_downloads(id, provider, episodes, title);
+#[tauri::command(async)]
+fn download(
+    d: State<'_, Arc<Dango>>,
+    id: i64,
+    provider: String,
+    episodes: Vec<String>,
+    title: String,
+    cover: Option<String>,
+    pinned: bool,
+) -> Res<()> {
+    d.inner().download(id, &provider, &episodes, &title, cover.as_deref(), pinned).map_err(err)
+}
+
+#[tauri::command(async)]
+#[allow(clippy::too_many_arguments)]
+fn track_playback(
+    d: State<'_, Arc<Dango>>,
+    id: i64,
+    provider: String,
+    episode: String,
+    url: String,
+    subtitles: Vec<Subtitle>,
+    title: String,
+    cover: Option<String>,
+) {
+    d.inner().track_playback(id, provider, episode, url, subtitles, title, cover);
+}
+
+#[tauri::command(async)]
+fn local_source(d: State<'_, Arc<Dango>>, id: i64, episode: String) -> Value {
+    serde_json::to_value(d.local_source(id, &episode)).unwrap_or_default()
+}
+
+#[tauri::command(async)]
+fn downloads(d: State<'_, Arc<Dango>>) -> Res<Value> {
+    d.downloads().map(|v| serde_json::to_value(v).unwrap_or_default()).map_err(err)
 }
 
 #[tauri::command]
+async fn delete_download(d: State<'_, Arc<Dango>>, key: String) -> Res<()> {
+    d.delete_download(&key).await.map_err(err)
+}
+
+#[tauri::command(async)]
+fn pin_download(d: State<'_, Arc<Dango>>, key: String, pinned: bool) -> Res<()> {
+    d.pin_download(&key, pinned).map_err(err)
+}
+
+#[tauri::command(async)]
+fn resume_download(d: State<'_, Arc<Dango>>, key: String) {
+    d.resume_download(&key);
+}
+
+#[tauri::command(async)]
 fn stop_downloads(d: State<'_, Arc<Dango>>) {
     d.stop_downloads();
-}
-
-#[tauri::command]
-fn downloads(d: State<'_, Arc<Dango>>) -> Value {
-    serde_json::to_value(d.downloads()).unwrap_or_default()
 }
 
 #[tauri::command]
@@ -156,9 +200,31 @@ async fn sweep_cache(d: State<'_, Arc<Dango>>) -> Res<Value> {
     Ok(serde_json::to_value(d.sweep_cache().await).unwrap_or_default())
 }
 
+/// Release builds abort on panic and have no console, so a crash would leave no trace.
+/// Record it in `<data>/crash.log` first.
+fn install_crash_log() {
+    let Ok(paths) = Paths::resolve() else { return };
+    let log = paths.data.join("crash.log");
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let bt = std::backtrace::Backtrace::force_capture();
+        let thread = std::thread::current().name().unwrap_or("unnamed").to_string();
+        let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let entry = format!("--- dango {} crashed (unix {secs}, thread {thread})\n{info}\n{bt}\n", dango_core::VERSION);
+        let _ = std::fs::create_dir_all(&paths.data);
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&log) {
+            use std::io::Write;
+            let _ = f.write_all(entry.as_bytes());
+        }
+        default(info);
+    }));
+}
+
 fn main() {
     dango_core::init_logging();
+    install_crash_log();
     tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let paths = Paths::resolve()?;
             let dango = tauri::async_runtime::block_on(Dango::start(paths))?;
@@ -188,9 +254,14 @@ fn main() {
             episodes,
             streams,
             prefetch_next,
-            queue_downloads,
-            stop_downloads,
+            download,
+            track_playback,
+            local_source,
             downloads,
+            delete_download,
+            pin_download,
+            resume_download,
+            stop_downloads,
             skip_times,
             library,
             library_add,

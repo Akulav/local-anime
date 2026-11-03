@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Main window: app commands, events and fullscreen toggling.",
+  "description": "Main window: app commands, events, fullscreen toggling and opening links in the browser.",
   "windows": ["main"],
-  "permissions": ["core:default", "core:window:allow-set-fullscreen"]
+  "permissions": ["core:default", "core:window:allow-set-fullscreen", "opener:default"]
 }

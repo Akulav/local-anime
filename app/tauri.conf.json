@@ -28,8 +28,10 @@
     "active": true,
     "targets": ["nsis", "appimage", "deb"],
     "category": "Video",
+    "publisher": "Akulav",
+    "copyright": "Made by Akulav, inspired by dango by serifpersia. MIT License.",
     "shortDescription": "Fast desktop anime player",
-    "longDescription": "dango finds working anime sources automatically, streams through a local disk cache and plays everything in a native window.",
+    "longDescription": "dango finds working anime sources automatically, streams through a local disk cache and plays everything in a native window. Made by Akulav, inspired by dango by serifpersia. Anime sources available on the dango provider registry.",
     "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.png", "icons/icon.ico"],
     "linux": {
       "deb": { "depends": ["libwebkit2gtk-4.1-0", "libgtk-3-0"] }

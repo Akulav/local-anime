@@ -85,21 +85,45 @@ pub fn sha_key(s: &str) -> String {
     hex::encode(&Sha256::digest(s.as_bytes())[..20])
 }
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DownloadStatus {
-    pub id: String,
-    pub label: Option<String>,
+/// A downloaded episode's stream, persisted so it keeps playing from disk after the
+/// provider's signed links expire.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SavedSource {
     /// "hls" or "file".
-    pub kind: &'static str,
-    /// HLS: segments; file: bytes.
+    pub kind: String,
+    /// HLS: the media playlist (best variant); file: the progressive file.
+    pub spec: Upstream,
+    /// HLS: the upstream media playlist and the URL it was fetched from.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub body: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub final_url: String,
+    #[serde(default)]
+    pub subtitles: Vec<SavedSub>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SavedSub {
+    pub label: String,
+    pub lang: String,
+    pub vtt: String,
+}
+
+/// Progress of a download. HLS counts segments, files count bytes.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct JobProgress {
     pub total: u64,
     pub done: u64,
     pub bytes: u64,
+    pub running: bool,
     /// The player is reading from this download right now.
     pub playing: bool,
-    pub complete: bool,
-    pub active: bool,
+}
+
+impl JobProgress {
+    pub fn complete(&self) -> bool {
+        self.total > 0 && self.done >= self.total
+    }
 }
 
 /// A player request within this window marks a download as the one being watched.
@@ -108,7 +132,6 @@ const MAX_JOBS: usize = 16;
 
 struct HlsJob {
     id: String,
-    label: Mutex<Option<String>>,
     segs: Vec<Upstream>,
     done: Vec<AtomicBool>,
     claimed: Vec<AtomicBool>,
@@ -147,13 +170,19 @@ impl HlsJob {
 }
 
 struct FileJob {
-    label: Mutex<Option<String>>,
     part: PathBuf,
     done_path: PathBuf,
     len: AtomicU64,
     water: watch::Sender<u64>,
     complete: AtomicBool,
     failed: AtomicBool,
+    cancelled: AtomicBool,
+}
+
+impl FileJob {
+    fn dead(&self) -> bool {
+        self.failed.load(Ordering::Relaxed) || self.cancelled.load(Ordering::Relaxed)
+    }
 }
 
 type SegFuture = Shared<BoxFuture<'static, Result<(PathBuf, u64), String>>>;
@@ -165,6 +194,9 @@ struct Playlist {
     segs: Option<Vec<Upstream>>,
     /// Master playlists: local URLs of the variants with their bandwidth.
     variants: Vec<(u64, String)>,
+    /// The upstream playlist as fetched, kept for [`SavedSource`].
+    raw: String,
+    final_url: String,
 }
 
 pub struct StreamInner {
@@ -182,6 +214,8 @@ pub struct StreamInner {
     inflight: Mutex<HashMap<String, SegFuture>>,
     jobs: Mutex<Vec<Arc<HlsJob>>>,
     files: Mutex<HashMap<String, Arc<FileJob>>>,
+    /// Downloaded episodes served under `/dl/{key}`.
+    saved: RwLock<HashMap<String, Arc<SavedSource>>>,
 }
 
 pub struct StreamServer {
@@ -477,33 +511,187 @@ impl StreamInner {
         Ok(playlist)
     }
 
-    /// Starts downloading a whole episode in the background without playing it.
+    /// Starts downloading a whole episode and returns what is needed to play it from disk later.
     /// For HLS the highest-bandwidth variant is chosen, which is also what the player pins.
-    pub async fn prefetch(self: &Arc<Self>, local_url: &str, label: String) -> Result<()> {
+    pub async fn prepare(self: &Arc<Self>, local_url: &str) -> Result<SavedSource> {
         let (kind, spec) = self.parse_local(local_url).ok_or_else(|| anyhow!("not a local stream url"))?;
         match kind.as_str() {
             "hls" => {
+                let mut spec = spec;
                 let mut pl = self.playlist(spec.clone()).await?;
-                let mut id = Self::job_id(&spec);
                 if let Some((_, best)) = pl.variants.iter().max_by_key(|(bw, _)| *bw).cloned() {
                     let (_, child) = self.parse_local(&best).ok_or_else(|| anyhow!("bad variant url"))?;
-                    id = Self::job_id(&child);
-                    pl = self.playlist(child).await?;
+                    pl = self.playlist(child.clone()).await?;
+                    spec = child;
                 }
                 if pl.segs.is_none() {
                     bail!("live or empty playlist");
                 }
-                if let Some(job) = self.jobs.lock().iter().find(|j| j.id == id) {
-                    *job.label.lock() = Some(label);
-                }
-                Ok(())
+                Ok(SavedSource {
+                    kind: "hls".into(),
+                    spec,
+                    body: pl.raw.clone(),
+                    final_url: pl.final_url.clone(),
+                    subtitles: Vec::new(),
+                })
             }
             "file" => {
-                let job = self.file_job(&spec);
-                *job.label.lock() = Some(label);
-                Ok(())
+                let src = SavedSource {
+                    kind: "file".into(),
+                    spec,
+                    body: String::new(),
+                    final_url: String::new(),
+                    subtitles: Vec::new(),
+                };
+                self.start_saved(&src);
+                Ok(src)
             }
             _ => bail!("unsupported stream kind {kind}"),
+        }
+    }
+
+    // ---------------- saved downloads ----------------
+
+    pub fn put_saved(&self, key: &str, src: Arc<SavedSource>) {
+        self.saved.write().insert(key.to_string(), src);
+    }
+
+    pub fn saved(&self, key: &str) -> Option<Arc<SavedSource>> {
+        self.saved.read().get(key).cloned()
+    }
+
+    pub fn remove_saved(&self, key: &str) {
+        if let Some(src) = self.saved.write().remove(key) {
+            self.cancel_saved(&src);
+        }
+    }
+
+    pub fn saved_url(&self, key: &str, src: &SavedSource) -> String {
+        let ext = if src.kind == "hls" { ".m3u8" } else { "" };
+        format!("{}/dl/{key}{ext}", self.base.read())
+    }
+
+    pub fn saved_sub_url(&self, key: &str, i: usize) -> String {
+        format!("{}/dls/{key}.{i}.vtt", self.base.read())
+    }
+
+    fn saved_playlist(self: &Arc<Self>, src: &SavedSource) -> Result<String> {
+        let id = Self::job_id(&src.spec);
+        let (pl, _) = self.rewrite(&src.body, &src.final_url, &src.spec, &id)?;
+        if let Some(segs) = pl.segs {
+            self.register_job(&id, segs);
+        }
+        Ok(pl.text)
+    }
+
+    /// Starts (or resumes) downloading a saved episode.
+    pub fn start_saved(self: &Arc<Self>, src: &SavedSource) {
+        if src.kind == "hls" {
+            if let Err(e) = self.saved_playlist(src) {
+                tracing::warn!("saved playlist unusable: {e:#}");
+            }
+        } else if !self.file_done_path(&src.spec).exists() {
+            self.file_job(&src.spec);
+        }
+    }
+
+    fn cancel_saved(&self, src: &SavedSource) {
+        if src.kind == "hls" {
+            let id = Self::job_id(&src.spec);
+            let mut jobs = self.jobs.lock();
+            for j in jobs.iter().filter(|j| j.id == id) {
+                j.cancelled.store(true, Ordering::Relaxed);
+                j.wake.notify_waiters();
+            }
+            jobs.retain(|j| j.id != id);
+        } else if let Some(f) = self.files.lock().remove(&sha_key(&src.spec.url)) {
+            f.cancelled.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// Progress of the running (or finished) download for this source, if there is one.
+    pub fn live_progress(&self, src: &SavedSource) -> Option<JobProgress> {
+        if src.kind == "hls" {
+            let id = Self::job_id(&src.spec);
+            let jobs = self.jobs.lock();
+            let j = jobs.iter().find(|j| j.id == id && !j.cancelled.load(Ordering::Relaxed))?;
+            return Some(JobProgress {
+                total: j.segs.len() as u64,
+                done: j.done_count() as u64,
+                bytes: j.bytes.load(Ordering::Relaxed),
+                running: j.running(),
+                playing: j.playing(),
+            });
+        }
+        let f = self.files.lock().get(&sha_key(&src.spec.url)).cloned()?;
+        if f.dead() {
+            return None;
+        }
+        let len = f.len.load(Ordering::Relaxed);
+        let water = *f.water.borrow();
+        let complete = f.complete.load(Ordering::Relaxed);
+        Some(JobProgress {
+            total: if len == u64::MAX { 0 } else { len },
+            done: water,
+            bytes: water,
+            running: !complete,
+            playing: false,
+        })
+    }
+
+    fn saved_segs(&self, src: &SavedSource) -> Vec<Upstream> {
+        self.rewrite(&src.body, &src.final_url, &src.spec, "").ok().and_then(|(p, _)| p.segs).unwrap_or_default()
+    }
+
+    /// Every file a saved download consists of (blocking-free, no disk access).
+    pub fn saved_paths(&self, src: &SavedSource) -> Vec<PathBuf> {
+        if src.kind == "hls" {
+            self.saved_segs(src).iter().map(|s| self.seg_path(&s.url)).collect()
+        } else {
+            let key = sha_key(&src.spec.url);
+            vec![self.file_dir.join(format!("{key}.bin")), self.file_dir.join(format!("{key}.part"))]
+        }
+    }
+
+    /// What of a saved download is on disk right now. Does blocking file system calls.
+    pub fn disk_progress(&self, src: &SavedSource) -> JobProgress {
+        let mut p = JobProgress::default();
+        if src.kind == "hls" {
+            let segs = self.saved_segs(src);
+            p.total = segs.len() as u64;
+            for s in &segs {
+                if let Ok(m) = std::fs::metadata(self.seg_path(&s.url)) {
+                    p.done += 1;
+                    p.bytes += m.len();
+                }
+            }
+        } else if let Ok(m) = std::fs::metadata(self.file_done_path(&src.spec)) {
+            (p.total, p.done, p.bytes) = (m.len(), m.len(), m.len());
+        }
+        p
+    }
+
+    async fn serve_saved(self: &Arc<Self>, kind: &str, data: &str, headers: &HeaderMap) -> Response<Body> {
+        let mut parts = data.split('.');
+        let Some(src) = parts.next().and_then(|k| self.saved(k)) else {
+            return text_response(StatusCode::NOT_FOUND, "download was removed");
+        };
+        match (kind, src.kind.as_str()) {
+            ("dl", "hls") => match self.saved_playlist(&src) {
+                Ok(text) => cors(
+                    Response::builder()
+                        .header(header::CONTENT_TYPE, "application/vnd.apple.mpegurl")
+                        .header(header::CACHE_CONTROL, "no-cache")
+                        .body(Body::from(text))
+                        .unwrap(),
+                ),
+                Err(e) => text_response(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
+            },
+            ("dl", _) => self.serve_file(src.spec.clone(), headers).await,
+            _ => match parts.next().and_then(|i| i.parse::<usize>().ok()).and_then(|i| src.subtitles.get(i)) {
+                Some(s) => vtt_response(s.vtt.clone()),
+                None => text_response(StatusCode::NOT_FOUND, "no such subtitle"),
+            },
         }
     }
 
@@ -514,13 +702,7 @@ impl StreamInner {
         Some((kind.to_string(), Upstream::decode(data.split('?').next()?)?))
     }
 
-    fn rewrite(
-        self: &Arc<Self>,
-        body: &str,
-        final_url: &str,
-        spec: &Upstream,
-        job_id: &str,
-    ) -> Result<(Playlist, bool)> {
+    fn rewrite(&self, body: &str, final_url: &str, spec: &Upstream, job_id: &str) -> Result<(Playlist, bool)> {
         let base = url::Url::parse(final_url)?;
         let is_master = body.contains("#EXT-X-STREAM-INF");
         let pinned;
@@ -575,11 +757,12 @@ impl StreamInner {
             out.push('\n');
         }
         let segs = (!is_master && vod && !segs.is_empty()).then_some(segs);
-        Ok((Playlist { text: out, segs, variants }, vod || is_master))
+        let playlist = Playlist { text: out, segs, variants, raw: body.to_string(), final_url: final_url.to_string() };
+        Ok((playlist, vod || is_master))
     }
 
     /// Adds a download job (or keeps the existing one). Jobs keep running after the player
-    /// stops reading them; the oldest finished ones are dropped from the list first.
+    /// stops reading them; finished ones are dropped from the list once there are many.
     fn register_job(self: &Arc<Self>, id: &str, segs: Vec<Upstream>) {
         let mut jobs = self.jobs.lock();
         if jobs.iter().any(|j| j.id == id && !j.cancelled.load(Ordering::Relaxed)) {
@@ -589,7 +772,6 @@ impl StreamInner {
         let n = segs.len();
         let job = Arc::new(HlsJob {
             id: id.to_string(),
-            label: Mutex::new(None),
             done: (0..n).map(|_| AtomicBool::new(false)).collect(),
             claimed: (0..n).map(|_| AtomicBool::new(false)).collect(),
             segs,
@@ -601,19 +783,33 @@ impl StreamInner {
         });
         jobs.push(job.clone());
         while jobs.len() > MAX_JOBS {
-            let victim = jobs.iter().position(|j| !j.running()).or_else(|| jobs.iter().position(|j| !j.playing()));
-            let Some(pos) = victim else { break };
-            let old = jobs.remove(pos);
-            old.cancelled.store(true, Ordering::Relaxed);
-            old.wake.notify_waiters();
+            let Some(pos) = jobs.iter().position(|j| !j.running()) else { break };
+            jobs.remove(pos);
         }
         drop(jobs);
-        let workers = self.settings.read().download_concurrency.max(1);
-        for _ in 0..workers {
-            let this = self.clone();
-            let job = job.clone();
-            tokio::spawn(async move { this.job_worker(job).await });
-        }
+        let this = self.clone();
+        tokio::spawn(async move {
+            // Segments already on disk (earlier sessions, other downloads) count right away.
+            let paths: Vec<PathBuf> = job.segs.iter().map(|s| this.seg_path(&s.url)).collect();
+            let sizes = tokio::task::spawn_blocking(move || {
+                paths.iter().map(|p| std::fs::metadata(p).map(|m| m.len()).ok()).collect::<Vec<_>>()
+            })
+            .await
+            .unwrap_or_default();
+            for (i, size) in sizes.into_iter().enumerate() {
+                if let Some(n) = size {
+                    if !job.done[i].swap(true, Ordering::Relaxed) {
+                        job.bytes.fetch_add(n, Ordering::Relaxed);
+                    }
+                }
+            }
+            let workers = this.settings.read().download_concurrency.max(1);
+            for _ in 0..workers {
+                let this = this.clone();
+                let job = job.clone();
+                tokio::spawn(async move { this.job_worker(job).await });
+            }
+        });
     }
 
     /// Background jobs wait while the player is downloading something else, and run one at a
@@ -771,23 +967,27 @@ impl StreamInner {
 
     // ---------------- progressive files ----------------
 
+    fn file_done_path(&self, spec: &Upstream) -> PathBuf {
+        self.file_dir.join(format!("{}.bin", sha_key(&spec.url)))
+    }
+
     fn file_job(self: &Arc<Self>, spec: &Upstream) -> Arc<FileJob> {
         let key = sha_key(&spec.url);
         let mut files = self.files.lock();
         if let Some(j) = files.get(&key) {
-            if !j.failed.load(Ordering::Relaxed) {
+            if !j.dead() {
                 return j.clone();
             }
         }
         let (tx, _) = watch::channel(0u64);
         let job = Arc::new(FileJob {
-            label: Mutex::new(None),
             part: self.file_dir.join(format!("{key}.part")),
             done_path: self.file_dir.join(format!("{key}.bin")),
             len: AtomicU64::new(0),
             water: tx,
             complete: AtomicBool::new(false),
             failed: AtomicBool::new(false),
+            cancelled: AtomicBool::new(false),
         });
         files.insert(key, job.clone());
         let this = self.clone();
@@ -837,6 +1037,9 @@ impl StreamInner {
             let mut failed = false;
             use futures::StreamExt;
             while let Some(chunk) = stream.next().await {
+                if job.cancelled.load(Ordering::Relaxed) {
+                    bail!("cancelled");
+                }
                 match chunk {
                     Ok(c) => {
                         file.write_all(&c).await?;
@@ -869,8 +1072,7 @@ impl StreamInner {
     }
 
     async fn serve_file(self: &Arc<Self>, spec: Upstream, headers: &HeaderMap) -> Response<Body> {
-        let key = sha_key(&spec.url);
-        let done = self.file_dir.join(format!("{key}.bin"));
+        let done = self.file_done_path(&spec);
         if let Ok(m) = tokio::fs::metadata(&done).await {
             touch(&done);
             return serve_disk_range(done, m.len(), headers).await;
@@ -985,25 +1187,28 @@ impl StreamInner {
 
     // ---------------- subtitles & images ----------------
 
-    async fn serve_sub(&self, spec: Upstream) -> Response<Body> {
+    async fn vtt(&self, spec: &Upstream) -> Result<Arc<String>> {
         let key = sha_key(&spec.url);
-        let text = match self.subs.get(&key) {
-            Some(t) => t,
-            None => match self.fetch(&spec, None, Duration::from_secs(20)).await {
-                Ok(r) => {
-                    let t = Arc::new(to_vtt(&r.text().await.unwrap_or_default()));
-                    self.subs.insert(key, t.clone());
-                    t
-                }
-                Err(e) => return text_response(StatusCode::BAD_GATEWAY, format!("{e:#}")),
-            },
-        };
-        cors(
-            Response::builder()
-                .header(header::CONTENT_TYPE, "text/vtt; charset=utf-8")
-                .body(Body::from(text.to_string()))
-                .unwrap(),
-        )
+        if let Some(t) = self.subs.get(&key) {
+            return Ok(t);
+        }
+        let r = self.fetch(spec, None, Duration::from_secs(20)).await?;
+        let t = Arc::new(to_vtt(&r.text().await?));
+        self.subs.insert(key, t.clone());
+        Ok(t)
+    }
+
+    /// Fetches a subtitle given its local URL, as WebVTT.
+    pub async fn fetch_vtt(&self, local_url: &str) -> Result<String> {
+        let (_, spec) = self.parse_local(local_url).ok_or_else(|| anyhow!("not a local subtitle url"))?;
+        Ok(self.vtt(&spec).await?.to_string())
+    }
+
+    async fn serve_sub(&self, spec: Upstream) -> Response<Body> {
+        match self.vtt(&spec).await {
+            Ok(t) => vtt_response(t.to_string()),
+            Err(e) => text_response(StatusCode::BAD_GATEWAY, format!("{e:#}")),
+        }
     }
 
     async fn serve_img(&self, spec: Upstream) -> Response<Body> {
@@ -1037,39 +1242,9 @@ impl StreamInner {
         )
     }
 
-    pub fn downloads(&self) -> Vec<DownloadStatus> {
-        let mut out: Vec<DownloadStatus> = self
-            .jobs
-            .lock()
-            .iter()
-            .map(|j| DownloadStatus {
-                id: j.id.clone(),
-                label: j.label.lock().clone(),
-                kind: "hls",
-                total: j.segs.len() as u64,
-                done: j.done_count() as u64,
-                bytes: j.bytes.load(Ordering::Relaxed),
-                playing: j.playing(),
-                complete: j.complete(),
-                active: !j.cancelled.load(Ordering::Relaxed),
-            })
-            .collect();
-        for (id, f) in self.files.lock().iter() {
-            let len = f.len.load(Ordering::Relaxed);
-            let water = *f.water.borrow();
-            out.push(DownloadStatus {
-                id: id.clone(),
-                label: f.label.lock().clone(),
-                kind: "file",
-                total: if len == u64::MAX { 0 } else { len },
-                done: water,
-                bytes: water,
-                playing: false,
-                complete: f.complete.load(Ordering::Relaxed),
-                active: !f.failed.load(Ordering::Relaxed),
-            });
-        }
-        out
+    /// Whether the player is streaming anything right now.
+    pub fn player_active(&self) -> bool {
+        self.jobs.lock().iter().any(|j| j.playing())
     }
 
     /// Cancels every download (manual "stop all").
@@ -1077,6 +1252,11 @@ impl StreamInner {
         for j in self.jobs.lock().drain(..) {
             j.cancelled.store(true, Ordering::Relaxed);
             j.wake.notify_waiters();
+        }
+        for f in self.files.lock().values() {
+            if !f.complete.load(Ordering::Relaxed) {
+                f.cancelled.store(true, Ordering::Relaxed);
+            }
         }
     }
 
@@ -1094,8 +1274,12 @@ impl StreamInner {
         self.playlists_vod.invalidate_all();
         self.playlists_live.invalidate_all();
         self.subs.invalidate_all();
-        self.files.lock().retain(|_, j| !j.complete.load(Ordering::Relaxed) && !j.failed.load(Ordering::Relaxed));
+        self.files.lock().retain(|_, j| !j.complete.load(Ordering::Relaxed) && !j.dead());
     }
+}
+
+fn vtt_response(text: String) -> Response<Body> {
+    cors(Response::builder().header(header::CONTENT_TYPE, "text/vtt; charset=utf-8").body(Body::from(text)).unwrap())
 }
 
 /// Minimal channel-backed body stream.
@@ -1157,6 +1341,9 @@ async fn handle(
 ) -> Response<Body> {
     if token != inner.token {
         return text_response(StatusCode::FORBIDDEN, "bad token");
+    }
+    if kind == "dl" || kind == "dls" {
+        return inner.serve_saved(&kind, &data, &headers).await;
     }
     let Some(spec) = Upstream::decode(&data) else {
         return text_response(StatusCode::BAD_REQUEST, "bad resource");
@@ -1221,6 +1408,7 @@ impl StreamServer {
             inflight: Mutex::new(HashMap::new()),
             jobs: Mutex::new(Vec::new()),
             files: Mutex::new(HashMap::new()),
+            saved: RwLock::new(HashMap::new()),
         });
         for d in [&inner.seg_dir, &inner.file_dir, &inner.img_dir] {
             tokio::fs::create_dir_all(d).await?;

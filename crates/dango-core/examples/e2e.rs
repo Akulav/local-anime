@@ -68,15 +68,15 @@ async fn main() -> anyhow::Result<()> {
                 println!("streams from {} ep {ep} in {:?}:", s.provider, t.elapsed());
                 // What the show page does on open: queue the first episodes in the background.
                 let next: Vec<String> = eps.iter().take(3).map(|e| e.number.clone()).collect();
-                app.queue_downloads(id, s.provider.clone(), next, "e2e".into());
-                picked = Some(v);
+                app.download(id, &s.provider, &next, "e2e", None, false)?;
+                picked = Some((v, ep));
                 break;
             }
             Ok(_) => println!("  {} only has embeds, trying next", s.provider),
             Err(e) => println!("  {} failed ({e:#}), trying next", s.provider),
         }
     }
-    let sources = picked.expect("no provider produced streams");
+    let (sources, first_ep) = picked.expect("no provider produced streams");
     for s in &sources {
         println!("  {} [{}] {} qualities, {} subs", s.name, s.kind, s.qualities.len(), s.subtitles.len());
     }
@@ -109,18 +109,25 @@ async fn main() -> anyhow::Result<()> {
         for round in 0..3 {
             tokio::time::sleep(Duration::from_secs(8)).await;
             println!("downloads after {}s:", (round + 1) * 8);
-            for d in app.downloads() {
+            for d in app.downloads()? {
                 println!(
-                    "  {:<18} {:>4}/{:<4} {:>7} KB playing={} complete={}",
-                    d.label.as_deref().unwrap_or("(player)"),
-                    d.done,
-                    d.total,
-                    d.bytes / 1024,
-                    d.playing,
-                    d.complete
+                    "  EP {:<4} {:<11} {:>4}/{:<4} {:>7} KB playing={}",
+                    d.record.episode,
+                    d.state,
+                    d.record.done,
+                    d.record.total,
+                    d.record.bytes / 1024,
+                    d.playing
                 );
             }
         }
+        // Playing it again goes through the saved copy, independent of the provider's links.
+        let local = app.local_source(id, &first_ep).expect("episode not saved");
+        let t = Instant::now();
+        let saved = client.get(&local.qualities[0].url).send().await?.text().await?;
+        let seg = saved.lines().find(|l| l.starts_with("http")).expect("no segments in saved playlist").to_string();
+        let bytes = client.get(&seg).send().await?.bytes().await?;
+        println!("saved copy: playlist + first segment ({} bytes) in {:?}", bytes.len(), t.elapsed());
     } else {
         let r = client.get(url).header("range", "bytes=0-65535").send().await?;
         println!("mp4: HTTP {} {:?}", r.status(), r.headers().get("content-range"));

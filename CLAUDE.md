@@ -9,6 +9,10 @@ an earlier Node.js/React web app (see git history before the Rust rewrite). Stre
 remote **provider registry** (`serifpersia/dango-providers`). Those provider modules are JavaScript
 and run unmodified inside an embedded QuickJS engine.
 
+Credits must stay intact: "Made by Akulav, inspired by dango by serifpersia" and "Anime sources
+available on the dango provider registry" appear in the README, the About page (`aboutView` in
+`app.js`) and the settings footer, and `LICENSE` keeps serifpersia's original MIT notice.
+
 ## Layout
 
 ```
@@ -22,9 +26,10 @@ crates/dango-core/         all logic, no UI dependency
   src/providers.rs         loads anime providers into JsProviders, proxy rules, catalog
   src/resolver.rs          parallel source probing, ranking, stream verification, playable source mapping
   src/stream.rs            local axum server: HLS rewrite, segment disk cache, background downloader, mp4 progressive cache, subs, images
+  src/downloads.rs         persistent download queue, saved sources, playback from disk, expiry
   src/janitor.rs           cache stats, age expiry + LRU eviction
   src/anilist.rs           GraphQL client (token bucket, request coalescing, memory+SQLite cache)
-  src/store.rs             SQLite: kv cache (TTL), settings, library, progress
+  src/store.rs             SQLite: kv cache (TTL), settings, library, progress, downloads
   src/settings.rs          user settings (JSON in the settings table)
   tests/js_runtime.rs      offline runtime test + DANGO_LIVE=1 live provider test
   examples/e2e.rs          live end-to-end pipeline smoke run
@@ -78,17 +83,29 @@ cd app && npx @tauri-apps/cli@2 build                # installers (nsis | appima
    are content-addressed files under `cache/segments/xx/<sha>`, and concurrent requests for the same
    segment share one download. MP4 uses `FileJob`: a sequential download to `.part` with a watch
    channel watermark. Ranges below the watermark stream from disk, far seeks pass through.
-7. **Background downloads** (`Dango::queue_downloads`, called by the show page with the resume
-   episode + `predownloadEpisodes`): resolves streams, picks the same source and quality as the
-   player, and calls `StreamInner::prefetch`. For HLS masters this picks the highest-BANDWIDTH
-   variant (the player pins `hls.currentLevel` to the top level, so both hit the same job/segments).
-   `Dango::streams` caches results for 90 minutes, so the player gets the same signed URLs the
-   prefetch used. Jobs are never cancelled when the player closes. A job the player requested
-   within 20 s is "playing" and takes priority, and other jobs run one at a time in queue order
-   (`should_yield`). At most 16 jobs are kept (finished ones dropped first). Downloaded files are
-   removed by the janitor after `cacheMaxAgeHours` (48 h default) since last access.
-8. **UI failover** (`app.js` `Player.failover`): next quality → next stream → next provider (in rank
-   order), keeping the playback position.
+7. **Downloads** (`downloads.rs`). Every downloaded or queued episode is a row in the `downloads`
+   table, keyed by `sha(anilistId:episode:mode)`. Its `source` column is a `SavedSource`: the media
+   playlist as fetched (body + final URL + upstream spec with headers) and the subtitles as VTT.
+   This is what makes downloads survive restarts and expired provider links: the saved playlist is
+   re-rewritten locally (`/dl/{key}.m3u8`, subtitles `/dls/{key}.{i}.vtt`), so segment URLs, and
+   therefore the content-addressed segment files, stay the same.
+   - Rows come from three places: the Download button / `D` / *Download all* (`pinned`, kept until
+     deleted), the show page pre-download (`predownloadEpisodes` from the resume point, not pinned),
+     and `track_playback` (the player records what it streams, not pinned).
+   - A single queue worker (`spawn_downloader`) handles one row at a time: resolve streams (same
+     choice as the player), `StreamInner::prepare` (best-BANDWIDTH variant, which the player pins
+     too), then watch progress. No progress for 3 min while nothing plays → retry once with
+     refreshed links, then mark failed. Pinned rows go ahead of pre-downloads. On startup, sources
+     are loaded into the stream server and unfinished rows are queued again.
+   - A new `HlsJob` first stats every segment on disk, so already-downloaded episodes show as
+     complete immediately. A job the player requested within 20 s is "playing" and others yield to it
+     (`should_yield`). Jobs are never cancelled when the player closes.
+   - The player asks `local_source` first and plays the saved copy when anything of it is on disk.
+   - Cleanup (`sweep_cache`): unpinned rows older than `cacheMaxAgeHours` (48 h default) since last
+     use are deleted with their files, then the janitor applies age/size limits to the rest of the
+     cache. Files of pinned rows and the active download are protected (`protected_files`).
+8. **UI failover** (`app.js` `Player.failover`): next quality → next stream → the same provider with
+   refreshed links → next provider (in rank order), keeping the playback position.
 
 Upstream headers: the spec's referer/origin/ua/cookie, then the registry proxy rule matched by host
 (`referer`, `origin`, `originFromReferer`, `scrape`, `cfCookie`, `mirrors`). The `cf_clearance`
@@ -105,6 +122,11 @@ cookie comes from settings.
   `tokio::time::timeout`. Keep it that way.
 - Host async functions spawn their real work on tokio (`tokio::spawn`), so network I/O isn't tied to
   the JS lock.
+- **Don't `tokio::spawn` from `Dango` methods; use `self.rt.spawn`.** Plain `#[tauri::command]`s run
+  on the UI thread outside the runtime, where `tokio::spawn` panics, and release builds use
+  `panic = "abort"`, so the app just disappears (this crashed playback once, see
+  `tests/threads.rs`). Commands that do real work are `#[tauri::command(async)]` or `async fn`.
+  Panics are written to `<data>/crash.log` by the hook in `app/src/main.rs`.
 - `prelude.js` must stay compatible with the provider contract the Node version offered
   (`RemoteCtx` in the old `server/src/providers/remote-loader.ts`): `ctx.cache`, `logger`,
   `fetchText`, `fetchJson`, `proxyUrl`, `titleMatch`, `resolveBestShowId`, `anilist`, `kitsu`,

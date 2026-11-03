@@ -1,5 +1,6 @@
 //! Disk cache housekeeping: age-based expiry plus LRU eviction down to the size limit.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -63,8 +64,9 @@ pub fn stats(cache_dir: &Path) -> CacheStats {
 }
 
 /// Deletes expired entries, then the least recently used ones until the cache is at 90% of
-/// `limit`. Images live longer (30 days) and are evicted last. `busy` files are skipped.
-pub fn sweep(cache_dir: &Path, limit: u64, max_age: Duration, busy: &[PathBuf]) -> SweepReport {
+/// `limit`. Images live longer (30 days) and are evicted last. `keep` files (running and saved
+/// downloads) are skipped.
+pub fn sweep(cache_dir: &Path, limit: u64, max_age: Duration, keep: &HashSet<PathBuf>) -> SweepReport {
     let now = SystemTime::now();
     let mut media = Vec::new();
     walk(&cache_dir.join("segments"), &mut media);
@@ -74,7 +76,7 @@ pub fn sweep(cache_dir: &Path, limit: u64, max_age: Duration, busy: &[PathBuf]) 
 
     let mut report = SweepReport::default();
     let remove = |e: &Entry, report: &mut SweepReport| {
-        if busy.iter().any(|b| b == &e.path) {
+        if keep.contains(&e.path) {
             return false;
         }
         if std::fs::remove_file(&e.path).is_ok() {
@@ -123,7 +125,7 @@ pub fn sweep(cache_dir: &Path, limit: u64, max_age: Duration, busy: &[PathBuf]) 
 }
 
 /// Removes every cached stream file (images too when `images` is set).
-pub fn clear(cache_dir: &Path, images: bool, busy: &[PathBuf]) -> SweepReport {
+pub fn clear(cache_dir: &Path, images: bool, keep: &HashSet<PathBuf>) -> SweepReport {
     let mut v = Vec::new();
     walk(&cache_dir.join("segments"), &mut v);
     walk(&cache_dir.join("files"), &mut v);
@@ -132,7 +134,7 @@ pub fn clear(cache_dir: &Path, images: bool, busy: &[PathBuf]) -> SweepReport {
     }
     let mut r = SweepReport::default();
     for e in v {
-        if busy.contains(&e.path) {
+        if keep.contains(&e.path) {
             continue;
         }
         if std::fs::remove_file(&e.path).is_ok() {
@@ -158,13 +160,13 @@ mod tests {
             let f = std::fs::File::options().write(true).open(&p).unwrap();
             f.set_modified(SystemTime::now() - Duration::from_secs(100 - i)).unwrap();
         }
-        let busy = vec![seg.join("f0")];
-        let r = sweep(&dir, 5000, Duration::from_secs(3600), &busy);
+        let keep = HashSet::from([seg.join("f0")]);
+        let r = sweep(&dir, 5000, Duration::from_secs(3600), &keep);
         assert!(r.remaining <= 5000, "{r:?}");
         assert!(seg.join("f0").exists(), "busy file kept");
         assert!(seg.join("f9").exists(), "newest kept");
         assert!(!seg.join("f1").exists(), "oldest evicted");
-        let r = sweep(&dir, 1 << 30, Duration::from_secs(1), &[]);
+        let r = sweep(&dir, 1 << 30, Duration::from_secs(1), &HashSet::new());
         assert!(r.remaining == 0 && r.removed > 0, "{r:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }

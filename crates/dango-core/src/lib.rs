@@ -2,6 +2,7 @@
 //! The desktop shell (`app/`) is a thin layer over [`Dango`].
 
 pub mod anilist;
+pub mod downloads;
 pub mod http;
 pub mod janitor;
 pub mod js;
@@ -16,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use parking_lot::RwLock;
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -67,8 +68,10 @@ pub struct Dango {
     pub resolver: Arc<Resolver>,
     pub http: Http,
     streams_cache: moka::sync::Cache<String, Arc<Vec<PlayableSource>>>,
-    /// Episodes already handed to the background downloader (key -> when).
-    queued: parking_lot::Mutex<std::collections::HashMap<String, std::time::Instant>>,
+    downloads: downloads::Queue,
+    /// Background work goes through this handle: callers like Tauri's sync commands run on the
+    /// UI thread, outside the runtime, where `tokio::spawn` panics.
+    rt: tokio::runtime::Handle,
 }
 
 const IMAGE_KEYS: [&str; 5] = ["extraLarge", "large", "medium", "bannerImage", "thumbnail"];
@@ -101,9 +104,11 @@ impl Dango {
                 .max_capacity(500)
                 .time_to_live(Duration::from_secs(90 * 60))
                 .build(),
-            queued: parking_lot::Mutex::new(std::collections::HashMap::new()),
+            downloads: Default::default(),
+            rt: tokio::runtime::Handle::current(),
         });
         me.spawn_background();
+        me.spawn_downloader();
         Ok(me)
     }
 
@@ -118,7 +123,7 @@ impl Dango {
 
     fn spawn_background(self: &Arc<Self>) {
         let me = self.clone();
-        tokio::spawn(async move {
+        self.rt.spawn(async move {
             loop {
                 if let Err(e) = me.providers.refresh(&me.registry_url()).await {
                     tracing::warn!("provider refresh failed: {e:#}");
@@ -127,7 +132,7 @@ impl Dango {
             }
         });
         let me = self.clone();
-        tokio::spawn(async move {
+        self.rt.spawn(async move {
             tokio::time::sleep(Duration::from_secs(20)).await;
             loop {
                 me.sweep_cache().await;
@@ -137,16 +142,20 @@ impl Dango {
         });
     }
 
+    /// Expires old downloads, then trims the cache to its age/size limits. Saved downloads
+    /// are never touched.
     pub async fn sweep_cache(&self) -> janitor::SweepReport {
+        self.expire_downloads().await;
         let (limit, age) = {
             let s = self.settings.read();
             (s.cache_limit_mb * 1024 * 1024, Duration::from_secs(s.cache_max_age_hours * 3600))
         };
         let dir = self.paths.cache.clone();
-        let busy = self.stream.busy_files();
-        let r = tokio::task::spawn_blocking(move || janitor::sweep(&dir, limit, age, &busy)).await.unwrap_or_default();
+        let keep = self.protected_files();
+        let r = tokio::task::spawn_blocking(move || janitor::sweep(&dir, limit, age, &keep)).await.unwrap_or_default();
         if r.removed > 0 {
             tracing::info!(removed = r.removed, freed = r.freed, "cache sweep");
+            self.refresh_disk_progress().await;
         }
         r
     }
@@ -172,7 +181,7 @@ impl Dango {
         *self.settings.write() = s.clone();
         if registry_changed {
             let me = self.clone();
-            tokio::spawn(async move {
+            self.rt.spawn(async move {
                 let _ = me.providers.refresh(&me.registry_url()).await;
             });
         }
@@ -275,57 +284,9 @@ impl Dango {
             return;
         }
         let me = self.clone();
-        tokio::spawn(async move {
+        self.rt.spawn(async move {
             let _ = me.streams(id, &provider, &episode, false).await;
         });
-    }
-
-    /// Downloads whole episodes in the background (one at a time, paused while the player
-    /// fetches something else). Downloads keep going after the player closes; the janitor
-    /// removes them once they exceed the cache age/size limits.
-    pub fn queue_downloads(self: &Arc<Self>, id: i64, provider: String, episodes: Vec<String>, title: String) {
-        let mode = self.settings.read().mode.clone();
-        let fresh: Vec<String> = {
-            let mut q = self.queued.lock();
-            q.retain(|_, t| t.elapsed() < Duration::from_secs(6 * 3600));
-            episodes
-                .into_iter()
-                .filter(|ep| q.insert(format!("{id}:{provider}:{ep}:{mode}"), std::time::Instant::now()).is_none())
-                .collect()
-        };
-        if fresh.is_empty() {
-            return;
-        }
-        let me = self.clone();
-        tokio::spawn(async move {
-            for ep in fresh {
-                let label = format!("{title} · EP {ep}");
-                let res = async {
-                    let mut sources = me.streams(id, &provider, &ep, false).await?;
-                    // Same choice the player makes: native sources first, first quality.
-                    sources.sort_by_key(|s| s.kind == "iframe");
-                    let src = sources.into_iter().find(|s| s.kind != "iframe").ok_or_else(|| anyhow!("embed only"))?;
-                    let url = src.qualities.first().map(|q| q.url.clone()).ok_or_else(|| anyhow!("no qualities"))?;
-                    me.stream.prefetch(&url, label.clone()).await
-                }
-                .await;
-                match res {
-                    Ok(()) => tracing::info!("queued download: {label}"),
-                    Err(e) => {
-                        tracing::info!("cannot pre-download {label}: {e:#}");
-                        me.queued.lock().remove(&format!("{id}:{provider}:{ep}:{mode}"));
-                    }
-                }
-            }
-        });
-    }
-
-    pub fn stop_downloads(&self) {
-        self.stream.stop_downloads();
-    }
-
-    pub fn downloads(&self) -> Vec<stream::DownloadStatus> {
-        self.stream.downloads()
     }
 
     /// Opening/ending timestamps from aniskip (needs the MAL id).
@@ -417,14 +378,21 @@ impl Dango {
         tokio::task::spawn_blocking(move || janitor::stats(&dir)).await.unwrap_or_default()
     }
 
+    /// Clears the caches. Downloads that aren't saved go too; saved ones stay.
     pub async fn clear_cache(&self, images: bool) -> janitor::SweepReport {
-        self.stream.stop_downloads();
+        self.stop_downloads();
+        for r in self.store.downloads().unwrap_or_default().into_iter().filter(|r| !r.pinned) {
+            let _ = self.delete_download(&r.key).await;
+        }
         self.stream.clear_memory();
         self.store.kv_clear();
         js::clear_provider_cache();
         let dir = self.paths.cache.clone();
-        let busy = self.stream.busy_files();
-        tokio::task::spawn_blocking(move || janitor::clear(&dir, images, &busy)).await.unwrap_or_default()
+        let keep = self.protected_files();
+        let r = tokio::task::spawn_blocking(move || janitor::clear(&dir, images, &keep)).await.unwrap_or_default();
+        self.refresh_disk_progress().await;
+        self.resume_downloads();
+        r
     }
 }
 

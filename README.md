@@ -10,6 +10,11 @@
 </p>
 
 <p align="center">
+  Made by <b>Akulav</b>, inspired by <a href="https://github.com/serifpersia/dango"><b>dango</b></a> by <b>serifpersia</b>.<br/>
+  Anime sources available on the <a href="https://github.com/serifpersia/dango-providers">dango provider registry</a>.
+</p>
+
+<p align="center">
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-ff8fb8?style=for-the-badge" alt="MIT"/></a>
   <img src="https://img.shields.io/badge/Rust-Tauri%202-ff8fb8?style=for-the-badge" alt="Rust + Tauri"/>
   <img src="https://img.shields.io/badge/Windows%20%7C%20Linux-desktop-ff8fb8?style=for-the-badge" alt="platforms"/>
@@ -22,15 +27,17 @@
 - **Automatic source picking.** Searching already contacts every provider in the background for the top results. Opening a show runs all providers in parallel: each one finds the show, lists its episodes and **test-plays a stream**. Working sources are ranked by verified playback, episode coverage and latency, and the best one is used. You can switch to any other provider, stream or quality at any time.
 - **Automatic failover.** If a quality, stream or provider fails during playback, dango moves on to the next one and keeps your position.
 - **Real-time download to disk.** Playback goes through a local streaming cache. HLS episodes download ahead of the playhead in parallel, so seeking within the episode is instant and stalls are rare. MP4 sources download progressively and play from the partial file while the download continues.
-- **Background episode downloads.** Opening a show downloads the episode you'd watch next and the one after it in the background (configurable). They download one at a time and pause while the player is fetching something else. Closing the player doesn't stop them, and their progress shows in the top bar and in *Library → Downloads*.
-- **Automatic cleanup.** Downloaded video is deleted 48 hours after its last use (configurable), and the cache also has a size limit with oldest-first eviction. Cleanup runs on startup and every 10 minutes.
+- **Download to watch later.** The download button on an episode (or `D` in the player, or *Download all* on a show) saves episodes to disk. Saved episodes play from disk with no buffering, even after the provider's links expire or after a restart, and stay until you delete them.
+- **Background episode downloads.** Opening a show downloads the episode you'd watch next and the one after it in the background (configurable). Downloads run one at a time, pause while the player is fetching something else, keep going after you close the player, and resume after a restart.
+- **Downloads tab.** Everything on disk, grouped by show, with live progress, play, keep, resume and delete. The top bar shows what's downloading right now.
+- **Automatic cleanup.** Episodes you didn't save (pre-downloads and ones you watched) are deleted 48 hours after their last use (configurable), and the cache also has a size limit with oldest-first eviction. Saved downloads are never touched. Cleanup runs on startup and every 10 minutes.
 - **Caching everywhere.** AniList responses (memory + SQLite), provider show IDs and episode lists, playlists, subtitles and cover images (on disk) are all cached, so the app is fast after the first load.
 - **A native desktop app.** One small executable with a native window, no browser and no server to run. Built with Rust and Tauri, with a plain-JS UI and no framework.
 - Continue watching, library, resume position, prepared next episode, autoplay, skip-intro (aniskip), subtitles (VTT/SRT/ASS → VTT), SUB/DUB, keyboard-driven player.
 
 ## Download
 
-Grab the latest build from [Releases](https://github.com/serifpersia/dango/releases):
+Grab the latest build from [Releases](https://github.com/Akulav/local-anime/releases):
 
 | Platform | File |
 | --- | --- |
@@ -58,6 +65,7 @@ Grab the latest build from [Releases](https://github.com/serifpersia/dango/relea
 | `N` / `P` | Next / previous episode |
 | `E` | Episode list |
 | `C` | Subtitles menu |
+| `D` | Download the episode to watch later |
 | `S` | Skip intro / outro |
 | `M` | Mute |
 | `Esc` | Close menu → exit fullscreen → close player |
@@ -127,6 +135,11 @@ See [CLAUDE.md](CLAUDE.md) for a deeper architecture tour.
 
 ## Credits & license
 
-dango was created by [serifpersia](https://github.com/serifpersia/dango). This is a Rust rewrite of the original Node.js app and uses the same provider registry and module contract.
+- **Made by Akulav**, inspired by [**dango** by serifpersia](https://github.com/serifpersia/dango). This is a Rust rewrite of serifpersia's original Node.js app and uses the same provider registry and module contract.
+- **Anime sources** are available on the [dango provider registry](https://github.com/serifpersia/dango-providers), maintained by serifpersia.
+- Metadata and artwork from [AniList](https://anilist.co), intro and outro timestamps from [AniSkip](https://aniskip.com).
+- Built with [Tauri](https://tauri.app), [rquickjs](https://github.com/DelSkayn/rquickjs), [hls.js](https://github.com/video-dev/hls.js) and [cheerio](https://cheerio.js.org).
 
-Released under the [MIT License](LICENSE).
+The same credits are shown in the app under *About*.
+
+Released under the [MIT License](LICENSE), keeping serifpersia's original copyright notice.

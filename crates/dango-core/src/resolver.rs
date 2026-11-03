@@ -75,7 +75,7 @@ pub struct Quality {
     pub url: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Subtitle {
     pub label: String,

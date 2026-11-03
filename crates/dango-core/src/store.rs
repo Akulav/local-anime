@@ -42,6 +42,33 @@ pub struct LibraryEntry {
     pub status: String,
 }
 
+/// A downloaded (or queued) episode.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DownloadRecord {
+    pub key: String,
+    pub anilist_id: i64,
+    pub episode: String,
+    pub mode: String,
+    pub title: String,
+    pub cover: Option<String>,
+    pub provider: String,
+    /// Saved by the user: kept until deleted instead of expiring.
+    pub pinned: bool,
+    /// JSON [`crate::stream::SavedSource`]; empty while the episode is still queued.
+    #[serde(skip)]
+    pub source: Option<String>,
+    pub total: u64,
+    pub done: u64,
+    pub bytes: u64,
+    pub error: Option<String>,
+    pub created_at: i64,
+    pub used_at: i64,
+}
+
+const DOWNLOAD_COLS: &str =
+    "key, anilist_id, episode, mode, title, cover, provider, pinned, source, total, done, bytes, error, created_at, used_at";
+
 impl Store {
     pub fn open(path: &Path) -> Result<Self> {
         let conn = Connection::open(path)?;
@@ -78,6 +105,23 @@ impl Store {
                 PRIMARY KEY (anilist_id, episode)
             );
             CREATE INDEX IF NOT EXISTS progress_recent ON progress(updated_at DESC);
+            CREATE TABLE IF NOT EXISTS downloads (
+                key TEXT PRIMARY KEY,
+                anilist_id INTEGER NOT NULL,
+                episode TEXT NOT NULL,
+                mode TEXT NOT NULL,
+                title TEXT NOT NULL,
+                cover TEXT,
+                provider TEXT NOT NULL,
+                pinned INTEGER NOT NULL DEFAULT 0,
+                source TEXT,
+                total INTEGER NOT NULL DEFAULT 0,
+                done INTEGER NOT NULL DEFAULT 0,
+                bytes INTEGER NOT NULL DEFAULT 0,
+                error TEXT,
+                created_at INTEGER NOT NULL,
+                used_at INTEGER NOT NULL
+            );
             "#,
         )?;
         Ok(Self { conn: Mutex::new(conn) })
@@ -225,5 +269,136 @@ impl Store {
         let c = self.conn.lock();
         c.execute("DELETE FROM progress WHERE anilist_id = ?1", params![id])?;
         Ok(())
+    }
+
+    // ---- downloads ----
+    fn map_download(r: &rusqlite::Row) -> rusqlite::Result<DownloadRecord> {
+        Ok(DownloadRecord {
+            key: r.get(0)?,
+            anilist_id: r.get(1)?,
+            episode: r.get(2)?,
+            mode: r.get(3)?,
+            title: r.get(4)?,
+            cover: r.get(5)?,
+            provider: r.get(6)?,
+            pinned: r.get(7)?,
+            source: r.get(8)?,
+            total: r.get::<_, i64>(9)? as u64,
+            done: r.get::<_, i64>(10)? as u64,
+            bytes: r.get::<_, i64>(11)? as u64,
+            error: r.get(12)?,
+            created_at: r.get(13)?,
+            used_at: r.get(14)?,
+        })
+    }
+
+    pub fn downloads(&self) -> Result<Vec<DownloadRecord>> {
+        let c = self.conn.lock();
+        let mut st = c.prepare(&format!("SELECT {DOWNLOAD_COLS} FROM downloads ORDER BY created_at, rowid"))?;
+        let rows = st.query_map([], Self::map_download)?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    pub fn download(&self, key: &str) -> Option<DownloadRecord> {
+        let c = self.conn.lock();
+        c.query_row(&format!("SELECT {DOWNLOAD_COLS} FROM downloads WHERE key = ?1"), params![key], Self::map_download)
+            .optional()
+            .ok()
+            .flatten()
+    }
+
+    /// Inserts a queued download; an existing one keeps its data and only gains `pinned`.
+    pub fn download_add(&self, d: &DownloadRecord) -> Result<()> {
+        let c = self.conn.lock();
+        c.execute(
+            "INSERT INTO downloads (key, anilist_id, episode, mode, title, cover, provider, pinned, created_at, used_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)
+             ON CONFLICT(key) DO UPDATE SET pinned = MAX(downloads.pinned, excluded.pinned), error = NULL",
+            params![d.key, d.anilist_id, d.episode, d.mode, d.title, d.cover, d.provider, d.pinned, now_secs()],
+        )?;
+        Ok(())
+    }
+
+    pub fn download_set_source(&self, key: &str, provider: &str, source: &str) -> Result<()> {
+        let c = self.conn.lock();
+        c.execute(
+            "UPDATE downloads SET source = ?2, provider = ?3, error = NULL WHERE key = ?1",
+            params![key, source, provider],
+        )?;
+        Ok(())
+    }
+
+    pub fn download_progress(&self, key: &str, total: u64, done: u64, bytes: u64) {
+        let c = self.conn.lock();
+        let _ = c.execute(
+            "UPDATE downloads SET total = ?2, done = ?3, bytes = ?4 WHERE key = ?1",
+            params![key, total as i64, done as i64, bytes as i64],
+        );
+    }
+
+    pub fn download_error(&self, key: &str, error: &str) {
+        let c = self.conn.lock();
+        let _ = c.execute("UPDATE downloads SET error = ?2 WHERE key = ?1", params![key, error]);
+    }
+
+    pub fn download_touch(&self, key: &str) {
+        let c = self.conn.lock();
+        let _ = c.execute("UPDATE downloads SET used_at = ?2 WHERE key = ?1", params![key, now_secs()]);
+    }
+
+    pub fn download_pin(&self, key: &str, pinned: bool) -> Result<()> {
+        let c = self.conn.lock();
+        c.execute("UPDATE downloads SET pinned = ?2, used_at = ?3 WHERE key = ?1", params![key, pinned, now_secs()])?;
+        Ok(())
+    }
+
+    pub fn download_delete(&self, key: &str) -> Result<()> {
+        let c = self.conn.lock();
+        c.execute("DELETE FROM downloads WHERE key = ?1", params![key])?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn downloads_keep_data_and_only_gain_pin() {
+        let path = std::env::temp_dir().join(format!("dango-store-{}.db", rand::random::<u32>()));
+        let s = Store::open(&path).unwrap();
+        let mut d = DownloadRecord {
+            key: "k".into(),
+            anilist_id: 1,
+            episode: "3".into(),
+            mode: "sub".into(),
+            title: "Show".into(),
+            cover: None,
+            provider: "p".into(),
+            pinned: false,
+            source: None,
+            total: 0,
+            done: 0,
+            bytes: 0,
+            error: None,
+            created_at: 0,
+            used_at: 0,
+        };
+        s.download_add(&d).unwrap();
+        s.download_set_source("k", "p2", "{}").unwrap();
+        s.download_progress("k", 10, 4, 400);
+        s.download_error("k", "boom");
+        d.pinned = true;
+        s.download_add(&d).unwrap();
+        let r = s.download("k").unwrap();
+        assert!(r.pinned && r.error.is_none());
+        assert_eq!((r.provider.as_str(), r.source.as_deref(), r.done, r.total), ("p2", Some("{}"), 4, 10));
+        d.pinned = false;
+        s.download_add(&d).unwrap();
+        assert!(s.download("k").unwrap().pinned, "re-adding never unpins");
+        s.download_delete("k").unwrap();
+        assert!(s.downloads().unwrap().is_empty());
+        drop(s);
+        let _ = std::fs::remove_file(&path);
     }
 }
