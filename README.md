@@ -116,12 +116,14 @@ cargo run -p dango-core --example e2e -- "frieren"
 
 ## Releases
 
-Every push to `main` runs [`.github/workflows/release.yml`](.github/workflows/release.yml), which:
+To publish a release, change `version` under `[workspace.package]` in the root `Cargo.toml`, commit and push to `main`. [`.github/workflows/release.yml`](.github/workflows/release.yml) then:
 
-1. runs format, clippy and tests on Windows and Linux,
-2. computes the next version (patch by default; put `#minor` or `#major` in the commit message for bigger bumps, or `[skip release]` to skip),
+1. skips the release if the tag `vX.Y.Z` already exists,
+2. runs format, clippy and tests on Windows and Linux,
 3. builds the Windows (installer + portable exe) and Linux (AppImage, deb, tarball) artifacts,
-4. commits the version bump, tags `vX.Y.Z` and publishes a GitHub release with the files and a changelog.
+4. tags `vX.Y.Z` on your commit and publishes a GitHub release with the files and a changelog.
+
+The workflow never pushes commits to `main`. Pushes that don't change the version publish nothing.
 
 ## Project layout
 

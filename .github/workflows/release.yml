@@ -1,21 +1,17 @@
 name: Release
 
-# Every push to main is tested, built for Windows and Linux, versioned and published as a
-# GitHub release. The version bump is patch by default; put "#minor" or "#major" in the
-# commit message (or pick one when running manually) for bigger bumps, "[skip release]"
-# to skip publishing.
+# Publishes a release when [workspace.package].version in Cargo.toml changes: edit it, commit,
+# push. The workflow tests, builds for Windows and Linux, tags v<version> on that commit and
+# publishes the release. It never pushes commits, so local main stays in sync. A version that
+# already has its tag is skipped. "Run workflow" on the Actions page does the same for the
+# current version (e.g. after a failed run).
 
 on:
   push:
     branches: [main]
-    paths-ignore: ["**.md", "LICENSE", ".editorconfig", ".gitattributes"]
+    # (this file too: a change to how releases are made publishes the current version if it isn't out yet)
+    paths: [Cargo.toml, .github/workflows/release.yml]
   workflow_dispatch:
-    inputs:
-      bump:
-        description: Version bump
-        type: choice
-        options: [patch, minor, major]
-        default: patch
 
 concurrency:
   group: release
@@ -29,43 +25,29 @@ env:
 
 jobs:
   version:
-    if: ${{ !contains(github.event.head_commit.message, '[skip release]') }}
+    name: New version?
     runs-on: ubuntu-22.04
     outputs:
-      version: ${{ steps.next.outputs.version }}
+      version: ${{ steps.v.outputs.version }}
+      publish: ${{ steps.v.outputs.publish }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      - id: next
-        name: Compute next version
+      - id: v
         shell: bash
-        env:
-          INPUT_BUMP: ${{ github.event.inputs.bump }}
-          COMMIT_MSG: ${{ github.event.head_commit.message }}
         run: |
-          current=$(grep -m1 -E '^version = "' Cargo.toml | sed -E 's/version = "(.*)"/\1/')
-          latest=$(git tag --list 'v*' --sort=-v:refname | head -n1 | sed 's/^v//')
-          # Start from whichever is newer: the last tag or the version in Cargo.toml.
-          base=$(printf '%s\n%s\n' "${latest:-0.0.0}" "$current" | sort -V | tail -n1)
-          bump="${INPUT_BUMP:-patch}"
-          case "$COMMIT_MSG" in *"#major"*) bump=major ;; *"#minor"*) bump=minor ;; esac
-          IFS=. read -r major minor patch <<< "$base"
-          if [ -z "$latest" ]; then
-            next="$current"   # first release ships the version already in Cargo.toml
+          v=$(grep -m1 -E '^version = "' Cargo.toml | sed -E 's/version = "(.*)"/\1/')
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          if git ls-remote --exit-code --tags origin "refs/tags/v$v" > /dev/null; then
+            echo "::notice::v$v is already released: nothing to publish (bump the version in Cargo.toml for a new release)"
+            echo "publish=false" >> "$GITHUB_OUTPUT"
           else
-            case "$bump" in
-              major) next="$((major + 1)).0.0" ;;
-              minor) next="$major.$((minor + 1)).0" ;;
-              *)     next="$major.$minor.$((patch + 1))" ;;
-            esac
+            echo "publish=true" >> "$GITHUB_OUTPUT"
           fi
-          echo "version=$next" >> "$GITHUB_OUTPUT"
-          echo "Releasing v$next (base $base, bump $bump)"
 
   test:
     needs: version
+    if: needs.version.outputs.publish == 'true'
     uses: ./.github/workflows/ci.yml
 
   build:
@@ -84,10 +66,6 @@ jobs:
       VERSION: ${{ needs.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set version
-        shell: bash
-        run: sed -i -E "0,/^version = \".*\"/s//version = \"$VERSION\"/" Cargo.toml
 
       - name: Linux system libraries
         if: runner.os == 'Linux'
@@ -141,22 +119,6 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: dtolnay/rust-toolchain@stable
-
-      - name: Commit version bump and tag
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          sed -i -E "0,/^version = \".*\"/s//version = \"$VERSION\"/" Cargo.toml
-          cargo update --workspace --offline || cargo update --workspace
-          if ! git diff --quiet; then
-            git commit -am "chore: release v$VERSION [skip ci]"
-          fi
-          git tag "v$VERSION"
-          git pull --rebase origin main
-          git push origin HEAD:main
-          git push origin "v$VERSION"
-
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -164,7 +126,7 @@ jobs:
 
       - name: Release notes
         run: |
-          prev=$(git tag --list 'v*' --sort=-v:refname | sed -n 2p)
+          prev=$(git tag --list 'v*' --sort=-v:refname | head -n1)
           {
             echo "## dango v$VERSION"
             echo
@@ -178,7 +140,7 @@ jobs:
             echo
             echo "### Changes"
             if [ -n "$prev" ]; then
-              git log "$prev..v$VERSION" --pretty=format:"* %s (%h)" --no-merges | grep -v 'chore: release' || true
+              git log "$prev..HEAD" --pretty=format:"* %s (%h)" --no-merges | grep -v 'chore: release' || true
             else
               git log -n 30 --pretty=format:"* %s (%h)" --no-merges
             fi
@@ -188,6 +150,8 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ env.VERSION }}
+          # (the tag is created on the commit that triggered this run)
+          target_commitish: ${{ github.sha }}
           name: dango v${{ env.VERSION }}
           body_path: notes.md
           files: dist/*

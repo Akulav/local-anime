@@ -16,7 +16,7 @@ available on the dango provider registry" appear in the README, the About page (
 ## Layout
 
 ```
-Cargo.toml                 workspace; [workspace.package].version is THE app version (CI bumps it)
+Cargo.toml                 workspace; [workspace.package].version is THE app version (bump it to release)
 crates/dango-core/         all logic, no UI dependency
   src/lib.rs               `Dango` facade: wires services, background tasks, image localisation
   src/js.rs                QuickJS runtime per provider + `__host` functions (http, sleep, cache, url, crypto, anilist)
@@ -142,8 +142,8 @@ cookie comes from settings.
   (hls.js). If you add a new resource origin, update it.
 - The UI has no build step. Inline event handlers are blocked by the CSP, so use `addEventListener`.
   Image fade-in uses a capturing `load` listener.
-- Version: only edit `[workspace.package].version` in the root `Cargo.toml`. The release workflow
-  bumps it automatically and commits `chore: release vX.Y.Z [skip ci]`.
+- Version: only edit `[workspace.package].version` in the root `Cargo.toml`. Changing it and
+  pushing to `main` publishes a release (tag `vX.Y.Z` on that commit); the workflow never pushes commits.
 
 ## Adding things
 
