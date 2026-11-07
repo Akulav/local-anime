@@ -7,6 +7,17 @@ pushed to `main`, GitHub Actions tags, builds and publishes the release.
 
 ## [Unreleased]
 
+## [4.1.1] - 2026-11-07
+
+### Fixed
+- **Crash while searching** (the window just vanished, nothing in the logs): two source checks running on the same
+  provider at once corrupted its JavaScript engine's memory (STATUS_HEAP_CORRUPTION). Typing a search checks the top
+  results in parallel, so some searches (e.g. "sword") crashed Tsukimi within seconds. Calls to one provider now run
+  one after another, and providers load one at a time.
+- A provider recursing very deeply could overflow the real thread stack and end the app silently; the engine's own
+  stack limit now sits below the thread's, so it fails that one call with an error instead.
+- CI on macOS: two tests stopped their runtime while provider modules were still loading in the background.
+
 ## [4.1.0] - 2026-11-07
 
 ### Changed

@@ -29,7 +29,10 @@ fn background_work_can_start_outside_the_runtime() {
     .join()
     .expect("calling from a non-runtime thread panicked");
 
-    drop(rt);
+    // Never drop the runtime (the app never does): `start` loads the provider modules in the
+    // background, and cancelling a QuickJS future mid-flight corrupts the heap (the likely cause
+    // of the macOS CI failure). Leaking it lets the process exit cleanly instead.
+    std::mem::forget(rt);
     let _ = std::fs::remove_dir_all(&dir);
 }
 

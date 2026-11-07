@@ -39,5 +39,8 @@ fn kept_downloads_survive_cache_cleanup() {
     assert_eq!(app.stream.keep_files(&src, false), 0, "nothing left to move");
 
     drop(app);
+    // Never drop the runtime: background provider loading may still be running QuickJS, and
+    // cancelling that mid-flight corrupts the heap (see threads.rs).
+    std::mem::forget(rt);
     let _ = std::fs::remove_dir_all(&dir);
 }

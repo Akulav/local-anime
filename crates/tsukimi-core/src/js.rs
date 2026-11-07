@@ -67,6 +67,10 @@ pub struct JsProvider {
     pub caps: ProviderCaps,
     ctx: std::mem::ManuallyDrop<AsyncContext>,
     _rt: std::mem::ManuallyDrop<AsyncRuntime>,
+    /// One call at a time per provider. Two `async_with!` calls interleaving on the same context
+    /// (rquickjs 0.9, `parallel`) corrupt the QuickJS heap: two concurrent `resolveShowId` calls on
+    /// AnimeYa crashed the app with STATUS_HEAP_CORRUPTION within seconds (examples/stress_provider).
+    calls: tokio::sync::Mutex<()>,
 }
 
 fn js_error(ctx: &Ctx<'_>, err: rquickjs::Error) -> String {
@@ -309,11 +313,20 @@ fn install_host<'js>(ctx: &Ctx<'js>, provider_id: &str) -> rquickjs::Result<()> 
     Ok(())
 }
 
+/// Loads run one at a time: creating QuickJS runtimes and evaluating modules on several threads
+/// at once crashed the live provider test with STATUS_HEAP_CORRUPTION. (The app loads with
+/// `join_all` on one task, so it never did this; the lock makes it safe for every caller.)
+static LOADING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 impl JsProvider {
     pub async fn load(id: &str, source: String) -> Result<Self> {
+        let _one_at_a_time = LOADING.lock().await;
         let rt = AsyncRuntime::new().context("quickjs runtime")?;
         rt.set_memory_limit(384 * 1024 * 1024).await;
-        rt.set_max_stack_size(8 * 1024 * 1024).await;
+        // Below the 2 MiB of a tokio worker thread, so deep recursion in a provider becomes a
+        // catchable JS "stack overflow" instead of overflowing the real stack (which kills the
+        // process silently). rquickjs measures it from where each call enters the runtime.
+        rt.set_max_stack_size(1024 * 1024).await;
         rt.set_gc_threshold(32 * 1024 * 1024).await;
         let ctx = AsyncContext::full(&rt).await.context("quickjs context")?;
 
@@ -352,6 +365,7 @@ impl JsProvider {
             caps,
             ctx: std::mem::ManuallyDrop::new(ctx),
             _rt: std::mem::ManuallyDrop::new(rt),
+            calls: tokio::sync::Mutex::new(()),
         })
     }
 
@@ -359,6 +373,8 @@ impl JsProvider {
     ///
     /// The timeout is enforced inside JS (a race against a host timer) so the Rust future
     /// always runs to completion under the runtime lock; dropping it mid-flight is unsound.
+    /// Calls to the same provider run one after another (see `calls`); waiting for the turn is
+    /// outside `async_with!`, so dropping a waiting call is fine.
     pub async fn call(
         &self,
         method: &str,
@@ -366,6 +382,7 @@ impl JsProvider {
         request_ctx: Option<Value>,
         timeout: Duration,
     ) -> Result<Value> {
+        let _turn = self.calls.lock().await;
         let m = method.to_string();
         let a = args.to_string();
         let rc = request_ctx.map(|v| v.to_string()).unwrap_or_default();

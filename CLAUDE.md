@@ -151,6 +151,16 @@ Upstream headers: the spec's referer/origin/ua/cookie, then the registry proxy r
   leaked on registry refresh (unchanged modules are reused, so this is rare).
 - **Never cancel an `async_with!` future.** Dropping it mid-flight frees JS values without the runtime lock. Timeouts
   are enforced inside JS (`__dango.call` races a host timer), not with `tokio::time::timeout`. Keep it that way.
+- **One call at a time per provider, one load at a time overall.** Two `async_with!` calls interleaving on the same
+  context, or runtimes created/evaluated on several threads at once, corrupt the QuickJS heap (rquickjs 0.9,
+  `parallel`). `JsProvider::call` holds `calls`, `JsProvider::load` holds the static `LOADING`. Regression check:
+  `METHOD=resolveShowId cargo run --release -p tsukimi-core --example stress_provider -- animeya 3 25`.
+- QuickJS's stack limit (`set_max_stack_size`, 1 MiB) must stay below the thread stack (tokio workers: 2 MiB), or deep
+  provider recursion overflows the real stack and the process dies without a trace.
+- Tests that `Tsukimi::start` must not drop their tokio runtime (`std::mem::forget(rt)`): background provider loading
+  would be cancelled mid-flight.
+- A crash that leaves neither `crash.log` nor a log line is a fail-fast (heap corruption, stack overflow); get the exit
+  code by running a release example under `cmd /c "… & echo %ERRORLEVEL%"` (0xC0000374 = heap corruption).
 - Host async functions spawn their real work on tokio (`tokio::spawn`), so network I/O isn't tied to the JS lock.
 - **Don't `tokio::spawn` from `Tsukimi` methods; use `self.rt.spawn`.** Plain `#[tauri::command]`s run on the UI thread
   outside the runtime, where `tokio::spawn` panics, and release builds use `panic = "abort"`, so the app just
