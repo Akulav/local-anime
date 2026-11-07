@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "dango",
-  "identifier": "dev.dango.desktop",
+  "productName": "Tsukimi",
+  "identifier": "com.akulav.tsukimi",
   "build": {
     "frontendDist": "ui"
   },
@@ -9,13 +9,14 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "dango",
+        "label": "main",
+        "title": "Tsukimi",
         "width": 1360,
         "height": 860,
         "minWidth": 960,
         "minHeight": 600,
         "center": true,
-        "backgroundColor": "#0b0b10",
+        "backgroundColor": "#0a0b12",
         "theme": "Dark",
         "dragDropEnabled": false
       }
@@ -25,19 +26,13 @@
     }
   },
   "bundle": {
-    "active": true,
-    "targets": ["nsis", "appimage", "deb"],
+    "active": false,
     "category": "Video",
     "publisher": "Akulav",
     "copyright": "Made by Akulav, inspired by dango by serifpersia. MIT License.",
-    "shortDescription": "Fast desktop anime player",
-    "longDescription": "dango finds working anime sources automatically, streams through a local disk cache and plays everything in a native window. Made by Akulav, inspired by dango by serifpersia. Anime sources available on the dango provider registry.",
-    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.png", "icons/icon.ico"],
-    "linux": {
-      "deb": { "depends": ["libwebkit2gtk-4.1-0", "libgtk-3-0"] }
-    },
-    "windows": {
-      "webviewInstallMode": { "type": "downloadBootstrapper" }
-    }
+    "shortDescription": "Tsukimi - fast desktop anime player",
+    "longDescription": "Tsukimi finds working anime sources automatically, streams through a local disk cache and keeps downloaded episodes for good. Made by Akulav, inspired by dango by serifpersia. Anime sources available on the dango provider registry.",
+    "homepage": "https://github.com/Akulav/local-anime",
+    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"]
   }
 }

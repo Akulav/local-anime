@@ -1,13 +1,15 @@
 [workspace]
 resolver = "2"
-members = ["crates/dango-core", "app"]
+members = ["crates/tsukimi-core", "app"]
 
 [workspace.package]
-version = "4.0.4"
+# THE app version: scripts/bump-version.ps1 changes it (with Cargo.lock and CHANGELOG.md); pushing a new
+# version to main publishes a release (.github/workflows/release.yml).
+version = "4.1.0"
 edition = "2021"
 license = "MIT"
-authors = ["serifpersia"]
-repository = "https://github.com/serifpersia/dango"
+authors = ["Akulav", "serifpersia"]
+repository = "https://github.com/Akulav/local-anime"
 
 [workspace.dependencies]
 anyhow = "1"

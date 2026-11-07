@@ -1,13 +1,13 @@
 //! Tauri runs sync commands on the UI thread, outside the tokio runtime. Methods reachable from
 //! them must not call `tokio::spawn` directly (it panics there, and release builds abort).
 
-use dango_core::{Dango, Paths};
+use tsukimi_core::{Paths, Tsukimi};
 
 #[test]
 fn background_work_can_start_outside_the_runtime() {
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let dir = std::env::temp_dir().join(format!("dango-threads-{}", rand_suffix()));
-    let app = rt.block_on(Dango::start(Paths { cache: dir.join("cache"), data: dir.clone() })).unwrap();
+    let dir = std::env::temp_dir().join(format!("tsukimi-threads-{}", rand_suffix()));
+    let app = rt.block_on(Tsukimi::start(Paths::under(dir.clone()))).unwrap();
 
     let a = app.clone();
     std::thread::spawn(move || {

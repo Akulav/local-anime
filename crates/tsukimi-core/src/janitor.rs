@@ -14,6 +14,8 @@ pub struct CacheStats {
     pub segment_bytes: u64,
     pub file_bytes: u64,
     pub image_bytes: u64,
+    /// Saved downloads (the downloads folder, not part of the cache or its limit).
+    pub download_bytes: u64,
 }
 
 #[derive(Debug, Default, Clone, Serialize)]
@@ -44,6 +46,13 @@ fn walk(dir: &Path, out: &mut Vec<Entry>) {
             });
         }
     }
+}
+
+/// Total size of the files under `dir`.
+pub fn dir_size(dir: &Path) -> u64 {
+    let mut v = Vec::new();
+    walk(dir, &mut v);
+    v.iter().map(|e| e.size).sum()
 }
 
 pub fn stats(cache_dir: &Path) -> CacheStats {
@@ -151,7 +160,7 @@ mod tests {
 
     #[test]
     fn evicts_oldest_until_under_limit() {
-        let dir = std::env::temp_dir().join(format!("dango-janitor-{}", rand::random::<u32>()));
+        let dir = std::env::temp_dir().join(format!("tsukimi-janitor-{}", rand::random::<u32>()));
         let seg = dir.join("segments").join("ab");
         std::fs::create_dir_all(&seg).unwrap();
         for i in 0..10u64 {

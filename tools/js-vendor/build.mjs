@@ -7,7 +7,7 @@ const here = path.dirname(fileURLToPath(import.meta.url))
 
 await build({
   entryPoints: [path.join(here, 'entry.js')],
-  outfile: path.join(here, '..', '..', 'crates', 'dango-core', 'js', 'vendor.js'),
+  outfile: path.join(here, '..', '..', 'crates', 'tsukimi-core', 'js', 'vendor.js'),
   bundle: true,
   format: 'iife',
   platform: 'neutral',

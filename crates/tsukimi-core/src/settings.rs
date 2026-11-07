@@ -29,6 +29,8 @@ pub struct Settings {
     pub cf_clearance: Option<String>,
     /// User-agent that obtained cf_clearance.
     pub cf_user_agent: Option<String>,
+    /// Look for a new Tsukimi release shortly after start and every 6 hours.
+    pub check_updates: bool,
     /// Schema revision for one-off migrations of stored settings. Missing in stored JSON
     /// means 0 (field-level default), unlike the other fields which fall back to `Default`.
     #[serde(default)]
@@ -55,6 +57,7 @@ impl Default for Settings {
             registry_url: None,
             cf_clearance: None,
             cf_user_agent: None,
+            check_updates: true,
             rev: REV,
         }
     }
@@ -92,5 +95,8 @@ mod tests {
         let s: Settings = serde_json::from_str(r#"{"cacheMaxAgeHours":72,"rev":1}"#).unwrap();
         assert_eq!(s.normalized().cache_max_age_hours, 72, "explicit choice after migration is kept");
         assert_eq!(Settings::default().normalized().predownload_episodes, 2);
+        // settings saved by dango (no checkUpdates) turn update checks on
+        let s: Settings = serde_json::from_str(r#"{"mode":"dub","rev":1}"#).unwrap();
+        assert!(s.check_updates && s.mode == "dub");
     }
 }

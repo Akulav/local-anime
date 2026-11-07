@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Tsukimi.app in the macOS disk image (release.yml fills in @VERSION@). The program inside keeps its data in
+     ~/Library/Application Support/dev.akulav.Tsukimi; an update replaces Contents/MacOS/tsukimi and re-signs the
+     app ad hoc (crates/tsukimi-core/src/updater.rs). -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key><string>Tsukimi</string>
+  <key>CFBundleDisplayName</key><string>Tsukimi</string>
+  <key>CFBundleIdentifier</key><string>com.akulav.tsukimi</string>
+  <key>CFBundleVersion</key><string>@VERSION@</string>
+  <key>CFBundleShortVersionString</key><string>@VERSION@</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleExecutable</key><string>tsukimi</string>
+  <key>CFBundleIconFile</key><string>icon</string>
+  <key>NSHumanReadableCopyright</key><string>Made by Akulav</string>
+  <key>LSApplicationCategoryType</key><string>public.app-category.entertainment</string>
+  <key>LSMinimumSystemVersion</key><string>11.0</string>
+  <key>NSHighResolutionCapable</key><true/>
+</dict>
+</plist>

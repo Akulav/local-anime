@@ -1,10 +1,18 @@
 name: Release
 
-# Publishes a release when [workspace.package].version in Cargo.toml changes: edit it, commit,
-# push. The workflow tests, builds for Windows and Linux, tags v<version> on that commit and
-# publishes the release. It never pushes commits, so local main stays in sync. A version that
-# already has its tag is skipped. "Run workflow" on the Actions page does the same for the
-# current version (e.g. after a failed run).
+# Publishes a release by itself: a push to main that changes the version in Cargo.toml
+# (scripts/bump-version.ps1, commit, push) runs the checks and tests, builds Tsukimi for Windows, Linux and
+# macOS (Apple Silicon), creates the tag v<version> on that commit and publishes the release. A version that
+# already has its tag is skipped, so nothing is published twice. The workflow never pushes commits.
+# "Run workflow" on the Actions page does the same for the current version (e.g. after a failed run).
+#
+# One file per system, and the same file installs and updates (crates/tsukimi-core/src/updater.rs downloads it):
+#   Tsukimi-setup.exe          Windows: the setup wizard (Inno Setup, app/installer/tsukimi.iss) - also the update
+#   tsukimi-linux-x64          Linux: the program; it installs itself (app menu entry) on its first start
+#   tsukimi-macos-arm64        macOS: the program, what an update downloads
+#   Tsukimi-macos-arm64.dmg    macOS: Tsukimi.app to drag into Applications (the first install)
+#   SHA256SUMS.txt             checksums of all of them: an update refuses a file that doesn't match
+# The release notes are the version's section of CHANGELOG.md (scripts/release-notes.ps1).
 
 on:
   push:
@@ -13,146 +21,158 @@ on:
     paths: [Cargo.toml, .github/workflows/release.yml]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 concurrency:
   group: release
   cancel-in-progress: false
-
-permissions:
-  contents: write
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  version:
+  check:
     name: New version?
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.v.outputs.version }}
       publish: ${{ steps.v.outputs.publish }}
+      prerelease: ${{ steps.v.outputs.prerelease }}
     steps:
       - uses: actions/checkout@v4
-
       - id: v
-        shell: bash
         run: |
-          v=$(grep -m1 -E '^version = "' Cargo.toml | sed -E 's/version = "(.*)"/\1/')
+          v="$(sed -nE 's/^version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' Cargo.toml | head -n1)"
+          echo "Cargo.toml version: $v"
           echo "version=$v" >> "$GITHUB_OUTPUT"
+          # (versions like 5.0.0-beta.1 become pre-releases)
+          case "$v" in *-*) echo "prerelease=true" ;; *) echo "prerelease=false" ;; esac >> "$GITHUB_OUTPUT"
           if git ls-remote --exit-code --tags origin "refs/tags/v$v" > /dev/null; then
-            echo "::notice::v$v is already released: nothing to publish (bump the version in Cargo.toml for a new release)"
+            echo "::notice::v$v is already released: nothing to publish (bump the version for a new release)"
             echo "publish=false" >> "$GITHUB_OUTPUT"
           else
             echo "publish=true" >> "$GITHUB_OUTPUT"
           fi
 
-  test:
-    needs: version
-    if: needs.version.outputs.publish == 'true'
-    uses: ./.github/workflows/ci.yml
+  tests:
+    name: Tests (${{ matrix.os }})
+    needs: check
+    if: needs.check.outputs.publish == 'true'
+    strategy:
+      matrix:
+        os: [windows-latest, ubuntu-22.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Linux desktop libraries (WebKitGTK)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node --check app/ui/app.js
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - run: cargo test --locked --workspace
 
   build:
-    needs: [version, test]
-    name: build (${{ matrix.name }})
+    name: Build (${{ matrix.name }})
+    needs: [check, tests]
     strategy:
-      fail-fast: false
       matrix:
         include:
           - name: windows-x64
             os: windows-latest
-          - name: linux-x86_64
+            bin: tsukimi.exe
+            asset: Tsukimi-setup.exe   # (made by the setup step below: the only Windows file)
+          - name: linux-x64
+            # (the oldest supported Ubuntu: the program then also runs on older Linux systems)
             os: ubuntu-22.04
+            bin: tsukimi
+            asset: tsukimi-linux-x64
+          - name: macos-arm64
+            # (Apple Silicon only; the linker gives an arm64 program the ad-hoc signature macOS needs to run it)
+            os: macos-15
+            bin: tsukimi
+            asset: tsukimi-macos-arm64
     runs-on: ${{ matrix.os }}
-    env:
-      VERSION: ${{ needs.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
-
-      - name: Linux system libraries
+      - name: Linux desktop libraries (WebKitGTK)
         if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev patchelf file
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: release
-
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-
-      - name: Build and bundle
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release
+      - name: Build the program (the UI is packed inside)
         working-directory: app
-        shell: bash
-        run: npx --yes @tauri-apps/cli@2 build --bundles $([ "$RUNNER_OS" = Windows ] && echo nsis || echo appimage,deb)
-
-      - name: Collect artifacts
+        run: npx --yes @tauri-apps/cli@2 build --no-bundle --ci
+      - name: Name it for the release
         shell: bash
         run: |
           mkdir -p dist
-          b=target/release/bundle
-          if [ "$RUNNER_OS" = "Windows" ]; then
-            cp target/release/dango.exe "dist/dango-v$VERSION-windows-x64-portable.exe"
-            cp $b/nsis/*.exe "dist/dango-v$VERSION-windows-x64-setup.exe"
-          else
-            tar -C target/release -czf "dist/dango-v$VERSION-linux-x86_64.tar.gz" dango
-            cp $b/appimage/*.AppImage "dist/dango-v$VERSION-linux-x86_64.AppImage"
-            cp $b/deb/*.deb "dist/dango-v$VERSION-linux-amd64.deb"
-          fi
-          ls -la dist
-
+          # (Windows has ONE file, the setup below: it installs and it updates. Linux and macOS: the program
+          # itself, which also updates itself from it)
+          if [ "${{ runner.os }}" != "Windows" ]; then cp "target/release/${{ matrix.bin }}" "dist/${{ matrix.asset }}"; fi
+      - name: Windows setup wizard (Tsukimi-setup.exe, with its uninstaller)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress }
+          $v = "${{ needs.check.outputs.version }}"
+          & $iscc /Qp "/DAppVersion=$v" "/DExe=$PWD\target\release\tsukimi.exe" "/O$PWD\dist" app\installer\tsukimi.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: macOS app in a disk image (Tsukimi-macos-arm64.dmg)
+        if: runner.os == 'macOS'
+        run: |
+          v="${{ needs.check.outputs.version }}"
+          app="dmg/Tsukimi.app"
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+          cp target/release/tsukimi "$app/Contents/MacOS/tsukimi"
+          cp app/icons/icon.icns "$app/Contents/Resources/icon.icns"
+          sed "s/@VERSION@/$v/g" app/installer/Info.plist > "$app/Contents/Info.plist"
+          codesign --force --deep --sign - "$app"   # (ad hoc: no certificate; macOS asks once on first open)
+          ln -s /Applications dmg/Applications
+          hdiutil create -volname Tsukimi -srcfolder dmg -ov -format UDZO dist/Tsukimi-macos-arm64.dmg
       - uses: actions/upload-artifact@v4
         with:
-          name: dango-${{ matrix.name }}
+          name: ${{ matrix.name }}
           path: dist/*
           if-no-files-found: error
 
   release:
-    needs: [version, build]
-    runs-on: ubuntu-22.04
-    env:
-      VERSION: ${{ needs.version.outputs.version }}
+    name: Publish the release
+    needs: [check, build]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
-
-      - name: Release notes
-        run: |
-          prev=$(git tag --list 'v*' --sort=-v:refname | head -n1)
-          {
-            echo "## dango v$VERSION"
-            echo
-            echo "| Platform | Download |"
-            echo "| --- | --- |"
-            echo "| Windows (installer) | \`dango-v$VERSION-windows-x64-setup.exe\` |"
-            echo "| Windows (portable) | \`dango-v$VERSION-windows-x64-portable.exe\` |"
-            echo "| Linux AppImage | \`dango-v$VERSION-linux-x86_64.AppImage\` |"
-            echo "| Debian/Ubuntu | \`dango-v$VERSION-linux-amd64.deb\` |"
-            echo "| Linux binary | \`dango-v$VERSION-linux-x86_64.tar.gz\` |"
-            echo
-            echo "### Changes"
-            if [ -n "$prev" ]; then
-              git log "$prev..HEAD" --pretty=format:"* %s (%h)" --no-merges | grep -v 'chore: release' || true
-            else
-              git log -n 30 --pretty=format:"* %s (%h)" --no-merges
-            fi
-          } > notes.md
-          cat notes.md
-
-      - uses: softprops/action-gh-release@v2
+      - name: Checksums
+        run: cd dist && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
+      - name: Release notes from CHANGELOG.md
+        shell: pwsh
+        run: ./scripts/release-notes.ps1 -Version "${{ needs.check.outputs.version }}" -OutFile notes.md
+      - name: Tag and publish (the tag v<version> is created on this commit)
+        uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ env.VERSION }}
-          # (the tag is created on the commit that triggered this run)
+          tag_name: v${{ needs.check.outputs.version }}
           target_commitish: ${{ github.sha }}
-          name: dango v${{ env.VERSION }}
+          name: Tsukimi ${{ needs.check.outputs.version }}
           body_path: notes.md
           files: dist/*
-          make_latest: true
+          fail_on_unmatched_files: true
+          prerelease: ${{ needs.check.outputs.prerelease }}
+          make_latest: ${{ needs.check.outputs.prerelease != 'true' }}

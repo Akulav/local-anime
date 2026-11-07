@@ -1,44 +1,57 @@
 name: CI
 
+# Checks every push to main and every pull request on all three systems: formatting, the UI script parses,
+# clippy without warnings, the tests, and that the Windows setup compiles. Releases are made by release.yml.
+
 on:
+  push:
+    branches: [main]
   pull_request:
-  workflow_call:
+  workflow_dispatch:
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  test:
-    name: test (${{ matrix.os }})
+  lint:
+    name: Format and UI script
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+      - run: node --check app/ui/app.js
+
+  app:
+    name: App (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-22.04]
+        os: [windows-latest, ubuntu-22.04, macos-15]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-
-      - name: Linux system libraries
+      - name: Linux desktop libraries (WebKitGTK)
         if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev
-
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
-
+          components: clippy
       - uses: Swatinem/rust-cache@v2
-
-      - name: Format
-        run: cargo fmt --all -- --check
-
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
-
-      - name: Tests
-        run: cargo test --workspace
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - run: cargo test --locked --workspace
+      - name: The Windows setup compiles (app/installer/tsukimi.iss)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cargo build --locked -p tsukimi
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress }
+          & $iscc /Qp "/DAppVersion=0.0.0" "/DExe=$PWD\target\debug\tsukimi.exe" "/O$env:RUNNER_TEMP" app\installer\tsukimi.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

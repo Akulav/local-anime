@@ -1,17 +1,19 @@
-//! dango core: metadata, provider runtime, source resolution, streaming cache.
-//! The desktop shell (`app/`) is a thin layer over [`Dango`].
+//! Tsukimi core: metadata, provider runtime, source resolution, streaming cache, downloads,
+//! updates. The desktop shell (`app/`) is a thin layer over [`Tsukimi`].
 
 pub mod anilist;
 pub mod downloads;
 pub mod http;
 pub mod janitor;
 pub mod js;
+mod migrate;
 pub mod providers;
 pub mod registry;
 pub mod resolver;
 pub mod settings;
 pub mod store;
 pub mod stream;
+pub mod updater;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -35,30 +37,46 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Paths {
+    /// Database, settings, logs, provider modules.
     pub data: PathBuf,
+    /// Stream cache (segments, progressive files, images): trimmed by the janitor.
     pub cache: PathBuf,
+    /// Downloaded episodes: never touched by the janitor or "Clear cache", only deleted by the user.
+    pub downloads: PathBuf,
 }
 
 impl Paths {
-    /// `DANGO_DATA_DIR`, then a `data/` folder next to the executable when a `portable` marker
-    /// file exists there, then the OS-standard locations.
+    /// All three under one folder (`TSUKIMI_DATA_DIR`, portable mode, tests).
+    pub fn under(dir: impl Into<PathBuf>) -> Self {
+        let d = dir.into();
+        Self { cache: d.join("cache"), downloads: d.join("downloads"), data: d }
+    }
+
+    /// `TSUKIMI_DATA_DIR`, then a `data/` folder next to the executable when a `portable` marker
+    /// file exists there, then the OS-standard locations (moved over from dango's on first start).
     pub fn resolve() -> Result<Self> {
-        if let Ok(d) = std::env::var("DANGO_DATA_DIR") {
-            let d = PathBuf::from(d);
-            return Ok(Self { cache: d.join("cache"), data: d });
+        if let Ok(d) = std::env::var("TSUKIMI_DATA_DIR") {
+            return Ok(Self::under(d));
         }
         if let Some(dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf)) {
             if dir.join("portable").exists() {
-                let d = dir.join("data");
-                return Ok(Self { cache: d.join("cache"), data: d });
+                return Ok(Self::under(dir.join("data")));
             }
         }
-        let pd = directories::ProjectDirs::from("dev", "dango", "dango").context("no home directory")?;
-        Ok(Self { data: pd.data_dir().to_path_buf(), cache: pd.cache_dir().to_path_buf() })
+        let pd = directories::ProjectDirs::from("dev", "akulav", "Tsukimi").context("no home directory")?;
+        let p = Self {
+            data: pd.data_dir().to_path_buf(),
+            cache: pd.cache_dir().to_path_buf(),
+            downloads: pd.data_local_dir().join("downloads"),
+        };
+        if let Some(old) = directories::ProjectDirs::from("dev", "dango", "dango") {
+            migrate::from_dango(&p, old.data_dir(), old.cache_dir());
+        }
+        Ok(p)
     }
 }
 
-pub struct Dango {
+pub struct Tsukimi {
     pub paths: Paths,
     pub store: Arc<Store>,
     pub settings: Arc<RwLock<Settings>>,
@@ -67,6 +85,7 @@ pub struct Dango {
     pub stream: Arc<StreamInner>,
     pub resolver: Arc<Resolver>,
     pub http: Http,
+    pub updater: Arc<updater::Updater>,
     streams_cache: moka::sync::Cache<String, Arc<Vec<PlayableSource>>>,
     downloads: downloads::Queue,
     /// Background work goes through this handle: callers like Tauri's sync commands run on the
@@ -76,11 +95,14 @@ pub struct Dango {
 
 const IMAGE_KEYS: [&str; 5] = ["extraLarge", "large", "medium", "bannerImage", "thumbnail"];
 
-impl Dango {
+impl Tsukimi {
     pub async fn start(paths: Paths) -> Result<Arc<Self>> {
         std::fs::create_dir_all(&paths.data)?;
         std::fs::create_dir_all(&paths.cache)?;
-        let store = Arc::new(Store::open(&paths.data.join("dango.db"))?);
+        std::fs::create_dir_all(&paths.downloads)?;
+        let db = paths.data.join("tsukimi.db");
+        migrate::rename_database(&paths.data, &db);
+        let store = Arc::new(Store::open(&db)?);
         let settings: Settings =
             store.setting("settings").and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
         let settings = Arc::new(RwLock::new(settings.normalized()));
@@ -88,10 +110,15 @@ impl Dango {
         let anilist = Anilist::new(http.clone(), store.clone());
         js::init_host(http.clone(), anilist.clone());
         let providers = Providers::new(paths.data.join("remote-providers"), http.clone(), VERSION);
-        let server = StreamServer::start(&paths.cache, http.clone(), providers.clone(), settings.clone()).await?;
+        let server =
+            StreamServer::start(&paths.cache, &paths.downloads, http.clone(), providers.clone(), settings.clone())
+                .await?;
         let stream = server.inner.clone();
         let resolver = Resolver::new(providers.clone(), store.clone(), stream.clone(), settings.clone());
+        let updater = updater::Updater::new(http.clone(), paths.data.join("updates"));
+        updater.cleanup();
         let me = Arc::new(Self {
+            updater,
             paths,
             store,
             settings,
@@ -138,6 +165,16 @@ impl Dango {
                 me.sweep_cache().await;
                 me.store.kv_purge();
                 tokio::time::sleep(Duration::from_secs(10 * 60)).await;
+            }
+        });
+        let me = self.clone();
+        self.rt.spawn(async move {
+            tokio::time::sleep(Duration::from_secs(20)).await;
+            loop {
+                if me.settings.read().check_updates {
+                    me.updater.check().await;
+                }
+                tokio::time::sleep(updater::CHECK_EVERY).await;
             }
         });
     }
@@ -266,14 +303,27 @@ impl Dango {
         episode: &str,
         refresh: bool,
     ) -> Result<Vec<PlayableSource>> {
-        let key = format!("{id}:{provider}:{episode}:{}", self.settings.read().mode);
+        let mode = self.settings.read().mode.clone();
+        self.streams_in(id, provider, episode, &mode, refresh).await
+    }
+
+    /// [`Self::streams`] for an explicit SUB/DUB mode (downloads keep the mode they were queued in).
+    pub async fn streams_in(
+        self: &Arc<Self>,
+        id: i64,
+        provider: &str,
+        episode: &str,
+        mode: &str,
+        refresh: bool,
+    ) -> Result<Vec<PlayableSource>> {
+        let key = format!("{id}:{provider}:{episode}:{mode}");
         if !refresh {
             if let Some(v) = self.streams_cache.get(&key) {
                 return Ok((*v).clone());
             }
         }
         let t = self.titles(id).await?;
-        let v = self.resolver.streams(&t, provider, episode).await?;
+        let v = self.resolver.streams(&t, provider, episode, mode).await?;
         self.streams_cache.insert(key, Arc::new(v.clone()));
         Ok(v)
     }
@@ -374,11 +424,17 @@ impl Dango {
     }
 
     pub async fn cache_stats(&self) -> janitor::CacheStats {
-        let dir = self.paths.cache.clone();
-        tokio::task::spawn_blocking(move || janitor::stats(&dir)).await.unwrap_or_default()
+        let (dir, dl) = (self.paths.cache.clone(), self.paths.downloads.clone());
+        tokio::task::spawn_blocking(move || janitor::CacheStats {
+            download_bytes: janitor::dir_size(&dl),
+            ..janitor::stats(&dir)
+        })
+        .await
+        .unwrap_or_default()
     }
 
-    /// Clears the caches. Downloads that aren't saved go too; saved ones stay.
+    /// Clears the caches. Downloads that aren't saved go too; saved ones (in the downloads folder,
+    /// or unfinished in the cache) stay.
     pub async fn clear_cache(&self, images: bool) -> janitor::SweepReport {
         self.stop_downloads();
         for r in self.store.downloads().unwrap_or_default().into_iter().filter(|r| !r.pinned) {
@@ -391,12 +447,12 @@ impl Dango {
         let keep = self.protected_files();
         let r = tokio::task::spawn_blocking(move || janitor::clear(&dir, images, &keep)).await.unwrap_or_default();
         self.refresh_disk_progress().await;
-        self.resume_downloads();
+        self.resume_downloads(false);
         r
     }
 }
 
-/// Installs a tracing subscriber honouring `RUST_LOG` (default `info` for dango crates).
+/// Installs a tracing subscriber honouring `RUST_LOG` (default `info` for Tsukimi's crates).
 pub fn init_logging() {
     init_logging_to(None);
 }
@@ -406,7 +462,7 @@ pub fn init_logging() {
 pub fn init_logging_to(file: Option<&Path>) {
     use tracing_subscriber::fmt::writer::MakeWriterExt;
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn,dango=info,dango_core=info"));
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn,tsukimi=info,tsukimi_core=info"));
     let log = file.and_then(|p| {
         let _ = p.parent().map(std::fs::create_dir_all);
         let big = std::fs::metadata(p).map(|m| m.len() > 5 << 20).unwrap_or(false);

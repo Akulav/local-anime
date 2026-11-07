@@ -1,15 +1,15 @@
 //! Exercises the embedded runtime with a synthetic provider (offline) and,
-//! when DANGO_LIVE=1, with real modules from the provider registry.
+//! when TSUKIMI_LIVE=1, with real modules from the provider registry.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use dango_core::{anilist::Anilist, http::Http, js, store::Store};
 use serde_json::json;
+use tsukimi_core::{anilist::Anilist, http::Http, js, store::Store};
 
 fn init() {
     let http = Http::new();
-    let dir = std::env::temp_dir().join(format!("dango-test-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("tsukimi-test-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let store = Arc::new(Store::open(&dir.join("t.db")).unwrap());
     js::init_host(http.clone(), Anilist::new(http, store));
@@ -69,15 +69,15 @@ async fn synthetic_provider_runs() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn live_providers_search() {
-    if std::env::var("DANGO_LIVE").ok().as_deref() != Some("1") {
+    if std::env::var("TSUKIMI_LIVE").ok().as_deref() != Some("1") {
         return;
     }
     init();
-    let dir = std::env::temp_dir().join("dango-live-reg");
+    let dir = std::env::temp_dir().join("tsukimi-live-reg");
     let store =
-        dango_core::registry::RegistryStore::new(dir, dango_core::registry::DEFAULT_REGISTRY.into(), Http::new());
+        tsukimi_core::registry::RegistryStore::new(dir, tsukimi_core::registry::DEFAULT_REGISTRY.into(), Http::new());
     let out = store.load("4.0.0", |p| p.kind() == "anime" && !p.mature).await.unwrap();
-    let only = std::env::var("DANGO_ONLY").ok();
+    let only = std::env::var("TSUKIMI_ONLY").ok();
     let mut handles = vec![];
     for m in out.modules {
         if only.as_deref().is_some_and(|o| o != m.entry.id) {

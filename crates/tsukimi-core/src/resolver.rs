@@ -570,9 +570,16 @@ impl Resolver {
         Ok(normalize_sources(&v))
     }
 
-    /// Playable sources for one episode; every URL points at the local stream server.
-    pub async fn streams(&self, titles: &MediaTitles, provider: &str, episode: &str) -> Result<Vec<PlayableSource>> {
-        let mode = self.settings.read().mode.clone();
+    /// Playable sources for one episode in `mode` ("sub"/"dub"); every URL points at the local
+    /// stream server.
+    pub async fn streams(
+        &self,
+        titles: &MediaTitles,
+        provider: &str,
+        episode: &str,
+        mode: &str,
+    ) -> Result<Vec<PlayableSource>> {
+        let mode = mode.to_string();
         let p = self.providers.get(provider).ok_or_else(|| anyhow!("unknown provider {provider}"))?;
         let show_id = self.show_id(&p, titles, &mode).await?.ok_or_else(|| anyhow!("show not found on {provider}"))?;
         let raw = self.raw_streams(provider, &show_id, episode, &mode).await?;

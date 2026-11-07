@@ -1,5 +1,5 @@
-// dango desktop UI. Plain ES modules, no framework: everything renders from template
-// strings into #view; the player is a persistent overlay.
+// Tsukimi desktop UI (made by Akulav). Plain ES modules, no framework: everything renders from
+// template strings into #view; the player is a persistent overlay.
 
 const T = window.__TAURI__
 const invoke = (cmd, args) => T.core.invoke(cmd, args)
@@ -53,11 +53,34 @@ const store = {
 }
 
 function toast(msg, bad = false, ms = 3500) {
+  const text = String(msg)
+  // the same message twice in a row (a failing action clicked again) doesn't stack
+  const last = $('#toasts').lastElementChild
+  if (last && last.textContent === text) last.remove()
   const el = document.createElement('div')
   el.className = `toast${bad ? ' bad' : ''}`
-  el.textContent = msg
+  el.textContent = text
   $('#toasts').append(el)
-  setTimeout(() => el.remove(), ms)
+  while ($('#toasts').childElementCount > 4) $('#toasts').firstElementChild.remove()
+  setTimeout(() => el.remove(), bad ? Math.max(ms, 6000) : ms)
+}
+
+// Destructive buttons ask once: the first click arms them for 4 s, the second one acts. The armed
+// button is remembered by id (pages re-render while you decide) and drawn with `armedClass(id)`.
+const Armed = { id: null, at: 0 }
+const isArmed = (id) => Armed.id === id && Date.now() - Armed.at < 4000
+const armedClass = (id) => (isArmed(id) ? 'confirm' : '')
+function confirmed(id, label, btn) {
+  if (isArmed(id)) {
+    Armed.id = null
+    return true
+  }
+  Armed.id = id
+  Armed.at = Date.now()
+  btn?.classList.add('confirm')
+  setTimeout(() => btn?.classList.remove('confirm'), 4000)
+  toast(label)
+  return false
 }
 
 // Images fade in once loaded (inline handlers are blocked by the CSP).
@@ -93,13 +116,74 @@ const DL = {
   forShow: (id) => new Map(DL.list.filter((d) => d.anilistId === id && d.mode === S.settings.mode).map((d) => [String(d.episode), d])),
   expires(d) {
     const h = (d.expiresAt - Date.now() / 1000) / 3600
-    return h <= 1 ? 'removed within 1h' : `removed in ${Math.round(h)}h`
+    return h <= 1 ? 'removed within 1h' : h < 48 ? `removed in ${Math.round(h)}h` : `removed in ${Math.round(h / 24)}d`
+  },
+  retryIn(d) {
+    const m = Math.max(0, Math.round((d.retryAt - Date.now() / 1000) / 60))
+    return m < 1 ? 'retrying now' : `retrying in ${m} min`
   },
 }
 
+// App updates (GitHub releases): the Update button in the rail and the panel in Settings / About.
+const Upd = {
+  info: null,
+  set(info) {
+    if (!info) return
+    this.info = info
+    const b = $('#rail-update')
+    const latest = info.latest
+    b.classList.toggle('hidden', !latest || info.selfBuilt)
+    b.classList.toggle('busy', info.installing)
+    b.disabled = info.installing
+    if (latest) {
+      b.title = info.installing ? `Downloading Tsukimi ${latest.version}…` : `Update to Tsukimi ${latest.version}`
+      $('span', b).textContent = info.installing ? (info.size ? `${Math.floor((info.downloaded / info.size) * 100)}%` : '…') : 'Update'
+    }
+    S.view?.onUpdate?.()
+  },
+  async refresh() {
+    this.set(await invoke('update_status').catch(() => null))
+  },
+  async check(manual = false) {
+    if (manual) this.set({ ...this.info, checking: true })
+    const info = await invoke('check_updates').catch((e) => ({ ...this.info, checking: false, error: String(e) }))
+    this.set(info)
+    if (manual) {
+      if (info.error) toast(`Couldn't check for updates: ${info.error}`, true)
+      else if (info.latest) toast(`Tsukimi ${info.latest.version} is available`)
+      else toast(`Tsukimi ${info.current} is the latest version`)
+    }
+  },
+  async install() {
+    if (!this.info?.latest || this.info.installing) return
+    if (Player.open) await Player.save()
+    toast(`Downloading Tsukimi ${this.info.latest.version}… it restarts when ready`, false, 6000)
+    this.set({ ...this.info, installing: true, downloaded: 0, size: 0 })
+    const tick = setInterval(() => this.refresh(), 700)
+    try {
+      await invoke('install_update') // (the app quits when the setup / new version takes over)
+    } catch (e) {
+      toast(`Update failed: ${e}`, true)
+    } finally {
+      clearInterval(tick)
+      this.refresh()
+    }
+  },
+}
+$('#rail-update').addEventListener('click', () => Upd.install())
+
+let polling = false
+let polls = 0
 async function pollDownloads() {
-  if (!S.boot) return
-  await DL.refresh()
+  if (!S.boot || polling) return
+  polling = true
+  try {
+    await DL.refresh()
+  } finally {
+    polling = false
+  }
+  // (the backend checks for updates by itself; pick up what it found once a minute)
+  if (++polls % 30 === 0 && !Upd.info?.installing) Upd.refresh()
   const el = $('#status')
   const busy = DL.busy()
   const d = busy.find((x) => x.state === 'downloading') || busy[0]
@@ -113,12 +197,12 @@ async function pollDownloads() {
 }
 setInterval(pollDownloads, 2000)
 
-// Saves episodes to disk (kept until deleted), in order, one at a time.
+// Downloads episodes to keep (until deleted), in order, one at a time.
 async function saveEpisodes(media, provider, episodes) {
   if (!provider) return toast('Still looking for a working source, try again in a moment', true)
   try {
     await invoke('download', { id: media.id, provider, episodes, title: titleOf(media), cover: coverOf(media), pinned: true })
-    toast(episodes.length === 1 ? `EP ${episodes[0]} will be saved to disk` : `${episodes.length} episodes will be saved to disk`)
+    toast(episodes.length === 1 ? `Downloading EP ${episodes[0]}, it stays until you delete it` : `Downloading ${episodes.length} episodes, they stay until you delete them`)
     pollDownloads()
   } catch (e) {
     toast(String(e), true)
@@ -304,7 +388,7 @@ async function showView(id) {
         <div class="actions">
           <button class="btn primary" id="play-main"><i class="ic ic-play"></i>${last ? `Resume EP ${esc(last.episode)}` : 'Play EP 1'}</button>
           <button class="btn" id="lib-toggle"><i class="ic ${m.inLibrary ? 'ic-check' : 'ic-plus'}"></i>${m.inLibrary ? 'In library' : 'Add to library'}</button>
-          <button class="btn" id="dl-all" title="Save every episode to disk"><i class="ic ic-disk"></i>Download all</button>
+          <button class="btn" id="dl-all" title="Download every episode to keep"><i class="ic ic-disk"></i>Download all</button>
           <div class="seg" id="mode-seg"><button data-mode="sub" class="${mode === 'sub' ? 'on' : ''}">SUB</button><button data-mode="dub" class="${mode === 'dub' ? 'on' : ''}">DUB</button></div>
         </div>
       </div>
@@ -367,12 +451,14 @@ async function showView(id) {
       el.className = `ep-dl${d ? ` has ${done ? (d.pinned ? 'saved' : 'auto') : 'busy'}` : ''}`
       el.innerHTML = d && !done ? (d.state === 'queued' ? '…' : `${Math.floor(DL.pct(d))}%`) : `<i class="ic ${d?.pinned ? 'ic-check' : 'ic-disk'}"></i>`
       el.title = !d
-        ? 'Download to watch later'
+        ? 'Download to keep'
         : done
           ? d.pinned
-            ? 'Saved on disk'
-            : `On disk, ${DL.expires(d)}. Click to keep it`
-          : `${d.state} · ${Math.floor(DL.pct(d))}%`
+            ? 'Downloaded, kept until you delete it'
+            : `Cached, ${DL.expires(d)}. Click to keep it`
+          : d.state === 'failed'
+            ? `Failed: ${d.error || 'unknown error'}${d.retryAt ? ` (${DL.retryIn(d)})` : ''}. Click to retry`
+            : `${d.state} · ${Math.floor(DL.pct(d))}%`
     }
   }
   v.onDownloads = updateDl
@@ -438,7 +524,8 @@ async function showView(id) {
     const dl = e.target.closest('.ep-dl')
     if (dl) {
       const d = DL.forShow(id).get(dl.dataset.dl)
-      if (d?.pinned && d.state === 'done') toast(`EP ${d.episode} is saved on disk`)
+      if (d?.pinned && d.state === 'done') toast(`EP ${d.episode} is downloaded (Downloads to delete it)`)
+      else if (d?.state === 'failed') invoke('resume_download', { key: d.key }).then(pollDownloads, (e) => toast(String(e), true))
       else saveEpisodes(m, v.selected || v.loadedProvider, [dl.dataset.dl])
       return
     }
@@ -450,10 +537,10 @@ async function showView(id) {
     const btn = e.currentTarget
     const saved = DL.forShow(id)
     const eps = v.episodes.map((x) => String(x.number)).filter((n) => !(saved.get(n)?.pinned && saved.get(n)?.state === 'done'))
-    if (!eps.length) return toast('Every episode is already saved')
+    if (!eps.length) return toast('Every episode is already downloaded')
     if (Date.now() - confirmAll > 4000) {
       confirmAll = Date.now()
-      btn.innerHTML = `<i class="ic ic-disk"></i>Save ${eps.length} episodes?`
+      btn.innerHTML = `<i class="ic ic-disk"></i>Download ${eps.length} episodes?`
       setTimeout(() => (btn.innerHTML = '<i class="ic ic-disk"></i>Download all'), 4000)
       return
     }
@@ -507,10 +594,11 @@ async function downloadsView() {
   const v = S.view
   view.innerHTML = `<div class="page fade-in">
     <h1>Downloads <small id="dl-total"></small><span class="grow"></span><button class="btn small hidden" data-dl-act="stop">Pause all</button></h1>
-    <div class="sub">Saved episodes stay until you delete them. Pre-downloaded and watched episodes are removed ${S.settings.cacheMaxAgeHours}h after you last used them.</div>
-    <div id="dl-body"></div></div>`
+    <div class="sub">Downloaded episodes stay until you delete them: cache cleanup never touches them. If a download fails it is retried on its own, from other providers too.</div>
+    <div id="dl-body"></div>
+    <div class="foot"><i class="ic ic-folder" style="width:14px;height:14px"></i><span class="path">${esc(S.boot.paths.downloads)}</span></div></div>`
   const btn = (act, key, icon, title, cls = '') =>
-    `<button class="ibtn ${cls}" data-dl-act="${act}" data-key="${esc(key)}" title="${title}"><i class="ic ${icon}"></i></button>`
+    `<button class="ibtn ${cls} ${armedClass(`${act}:${key}`)}" data-dl-act="${act}" data-key="${esc(key)}" title="${title}"><i class="ic ${icon}"></i></button>`
   const busyRow = (d) => {
     const pct = DL.pct(d)
     const what = d.state === 'queued' ? 'queued' : `${d.playing ? 'playing · ' : ''}${pct.toFixed(0)}% · ${fmtBytes(d.bytes)}`
@@ -523,40 +611,72 @@ async function downloadsView() {
       d.state === 'done'
         ? fmtBytes(d.bytes)
         : d.state === 'failed'
-          ? `<span class="err" title="${esc(d.error)}">Failed: ${esc(d.error)}</span>`
+          ? `<span class="err" title="${esc(d.error)}">Failed${d.retryAt ? `, ${DL.retryIn(d)}` : ''}: ${esc(d.error)}</span>`
           : `<div class="meter"><i style="width:${pct}%"></i></div>${d.state} · ${pct.toFixed(0)}%`
-    const tag = d.pinned ? '<span class="tag saved">Saved</span>' : `<span class="tag" title="Not saved, removed automatically">${DL.expires(d)}</span>`
-    return `<div class="dl-ep"><span class="n">EP ${esc(d.episode)}</span><div class="info">${tag}${info}</div><div class="acts">
+    const tag = d.pinned
+      ? d.state === 'done'
+        ? '<span class="tag saved">Kept</span>'
+        : ''
+      : `<span class="tag" title="Cached while watching, removed automatically">${DL.expires(d)}</span>`
+    return `<div class="dl-ep"><span class="n">EP ${esc(d.episode)}${d.mode === 'dub' ? ' · DUB' : ''}</span><div class="info">${tag}${info}</div><div class="acts">
       ${d.done > 0 ? btn('play', d.key, 'ic-play', 'Play') : ''}
-      ${d.state === 'paused' || d.state === 'failed' ? btn('resume', d.key, 'ic-refresh', 'Resume download') : ''}
-      ${btn('pin', d.key, d.pinned ? 'ic-pinned' : 'ic-pin', d.pinned ? 'Saved. Click to let it expire' : 'Keep until I delete it', d.pinned ? 'on' : '')}
+      ${d.state === 'paused' || d.state === 'failed' ? btn('resume', d.key, 'ic-refresh', 'Retry now') : ''}
+      ${d.pinned ? '' : btn('pin', d.key, 'ic-pin', 'Keep it (until I delete it)')}
       ${btn('del', d.key, 'ic-trash', 'Delete from disk', 'danger')}</div></div>`
   }
-  const render = () => {
-    if (S.view !== v) return
-    const list = DL.list
-    const busy = DL.busy()
-    $('[data-dl-act="stop"]', view).classList.toggle('hidden', !busy.length)
-    $('#dl-total').textContent = list.length ? `${list.filter((d) => d.state === 'done').length} on disk · ${fmtBytes(list.reduce((a, d) => a + d.bytes, 0))}` : ''
-    if (!list.length) {
-      $('#dl-body').innerHTML = `<div class="empty">Nothing downloaded yet.<br>Use the download button on an episode, or press <kbd>D</kbd> in the player, to watch it later without buffering.</div>`
-      return
-    }
+  const block = (eps, kept) => {
+    const d = eps[0]
+    eps.sort((a, b) => parseFloat(a.episode) - parseFloat(b.episode) || String(a.episode).localeCompare(b.episode))
+    return `<div class="dl-show"><a class="cv" href="#/anime/${d.anilistId}" ${d.cover ? `style="background-image:url('${esc(d.cover)}')"` : ''}></a><div>
+      <h4><a href="#/anime/${d.anilistId}">${esc(d.title)}</a><small>${eps.length} episode${eps.length > 1 ? 's' : ''} · ${fmtBytes(
+        eps.reduce((a, x) => a + x.bytes, 0)
+      )}</small>${kept ? `<span class="acts">${btn('del-show', String(d.anilistId), 'ic-trash', 'Delete every downloaded episode of this show', 'danger')}</span>` : ''}</h4>
+      ${eps.map(epRow).join('')}</div></div>`
+  }
+  const byShow = (list) => {
     const shows = new Map()
     for (const d of [...list].sort((a, b) => b.usedAt - a.usedAt)) {
       if (!shows.has(d.anilistId)) shows.set(d.anilistId, [])
       shows.get(d.anilistId).push(d)
     }
-    const block = (eps) => {
-      const d = eps[0]
-      eps.sort((a, b) => parseFloat(a.episode) - parseFloat(b.episode) || String(a.episode).localeCompare(b.episode))
-      return `<div class="dl-show"><a class="cv" href="#/anime/${d.anilistId}" ${d.cover ? `style="background-image:url('${esc(d.cover)}')"` : ''}></a><div>
-        <h4><a href="#/anime/${d.anilistId}">${esc(d.title)}</a><small>${eps.length} episode${eps.length > 1 ? 's' : ''} · ${fmtBytes(
-          eps.reduce((a, x) => a + x.bytes, 0)
-        )}</small></h4>${eps.map(epRow).join('')}</div></div>`
-    }
-    $('#dl-body').innerHTML = `${busy.length ? `<div class="panel" style="margin-bottom:18px"><h3>In progress</h3><div class="dl-list">${busy.map(busyRow).join('')}</div></div>` : ''}
-      <div class="panel">${[...shows.values()].map(block).join('')}</div>`
+    return [...shows.values()]
+  }
+  let cacheOpen = false
+  let lastSig = ''
+  const render = (force = false) => {
+    if (S.view !== v) return
+    const list = DL.list
+    // (polled every 2 s: only touch the page when something changed)
+    const sig = JSON.stringify([list, isArmed(Armed.id) && Armed.id, Math.floor(Date.now() / 60000)])
+    if (!force && sig === lastSig) return
+    lastSig = sig
+    const busy = DL.busy()
+    const kept = list.filter((d) => d.pinned)
+    const cached = list.filter((d) => !d.pinned && d.state === 'done')
+    $('[data-dl-act="stop"]', view).classList.toggle('hidden', !busy.length)
+    const done = kept.filter((d) => d.state === 'done')
+    $('#dl-total').textContent = kept.length ? `${done.length} downloaded · ${fmtBytes(done.reduce((a, d) => a + d.bytes, 0))}` : ''
+    const open = $('#dl-cache', view)?.open ?? cacheOpen
+    cacheOpen = open
+    $('#dl-body').innerHTML = `
+      ${busy.length ? `<div class="panel dl-sec"><h3>In progress</h3><div class="dl-list">${busy.map(busyRow).join('')}</div></div>` : ''}
+      <div class="panel dl-sec" style="margin-top:18px"><h3>Downloaded</h3>${
+        kept.length
+          ? byShow(kept)
+              .map((eps) => block(eps, true))
+              .join('')
+          : `<div class="empty" style="padding:30px 0">Nothing downloaded yet.<br>Use the download button on an episode, <b>Download all</b> on a show, or press <kbd>D</kbd> in the player.</div>`
+      }</div>
+      ${
+        cached.length
+          ? `<div class="panel dl-sec" style="margin-top:18px"><details id="dl-cache" ${open ? 'open' : ''}><summary>Cached while watching · ${cached.length} episode${
+              cached.length > 1 ? 's' : ''
+            } · ${fmtBytes(cached.reduce((a, d) => a + d.bytes, 0))} · removed ${S.settings.cacheMaxAgeHours}h after last use</summary>
+            ${byShow(cached)
+              .map((eps) => block(eps, false))
+              .join('')}</details></div>`
+          : ''
+      }`
   }
   const onClick = async (e) => {
     const b = e.target.closest('[data-dl-act]')
@@ -567,16 +687,27 @@ async function downloadsView() {
     try {
       switch (b.dataset.dlAct) {
         case 'play':
-          return Player.play(await getDetails(d.anilistId), d.episode, { provider: d.provider })
+          if (d) Player.play(await getDetails(d.anilistId), d.episode, { provider: d.provider })
+          return
         case 'pin':
-          await invoke('pin_download', { key, pinned: !d.pinned })
+          await invoke('pin_download', { key, pinned: true })
+          toast(`EP ${d?.episode} is kept until you delete it`)
           break
         case 'resume':
           await invoke('resume_download', { key })
           break
         case 'del':
+          if (d?.pinned && d.state === 'done' && !confirmed(`del:${key}`, `Click again to delete EP ${d.episode} from disk`, b)) return
           await invoke('delete_download', { key })
           break
+        case 'del-show': {
+          const eps = DL.list.filter((x) => String(x.anilistId) === key && x.pinned)
+          const label = `Click again to delete ${eps.length} episode${eps.length > 1 ? 's' : ''} of ${eps[0]?.title || 'this show'}`
+          if (!confirmed(`del-show:${key}`, label, b)) return
+          for (const x of eps) await invoke('delete_download', { key: x.key })
+          toast(`Deleted ${eps.length} episode${eps.length > 1 ? 's' : ''}`)
+          break
+        }
         case 'stop':
           await invoke('stop_downloads')
           toast('Downloads paused')
@@ -586,20 +717,64 @@ async function downloadsView() {
       toast(String(err), true)
     }
     await DL.refresh()
-    render()
+    render(true)
   }
   view.addEventListener('click', onClick)
   v.leave = () => view.removeEventListener('click', onClick)
-  v.onDownloads = render
+  v.onDownloads = () => render()
   await DL.refresh()
-  render()
+  render(true)
+}
+
+// The "Updates" panel (Settings and About share it).
+function updatePanel() {
+  const u = Upd.info || {}
+  const l = u.latest
+  const when = u.checkedAt ? new Date(u.checkedAt * 1000).toLocaleString() : 'not yet'
+  const state = u.selfBuilt
+    ? `<span class="upd-state">Built from source: update it with git pull and a new build</span>`
+    : u.installing
+      ? `<span class="upd-state new">Downloading Tsukimi ${esc(l?.version)}… ${u.size ? `${fmtBytes(u.downloaded)} of ${fmtBytes(u.size)}` : ''}</span>`
+      : u.checking
+        ? `<span class="upd-state">Checking…</span>`
+        : l
+          ? `<span class="upd-state new">Tsukimi ${esc(l.version)} is available</span>`
+          : u.error
+            ? `<span class="upd-state bad" title="${esc(u.error)}">Couldn't check: ${esc(u.error)}</span>`
+            : `<span class="upd-state">You have the latest version</span>`
+  return `<div class="upd">
+    <div class="upd-row">${state}<span class="grow"></span>
+      <button class="btn small" data-upd="check" ${u.checking || u.installing ? 'disabled' : ''}><i class="ic ic-refresh"></i>Check for updates</button>
+      ${l && !u.selfBuilt ? `<button class="btn small primary" data-upd="install" ${u.installing ? 'disabled' : ''}><i class="ic ic-up"></i>Update to ${esc(l.version)}</button>` : ''}</div>
+    ${u.installing && u.size ? `<div class="meter"><i style="width:${Math.min(100, (u.downloaded / u.size) * 100)}%"></i></div>` : ''}
+    ${l?.notes ? `<div class="upd-notes">${esc(l.notes)}</div>` : ''}
+    <div class="foot"><span>Version ${esc(S.boot.version)}</span><span>· last checked ${esc(when)}</span>${
+      l?.url ? `<span>· <a class="ext" data-href="${esc(l.url)}" href="${esc(l.url)}">What's new</a></span>` : ''
+    }</div></div>`
+}
+
+// Wires an updates panel inside `root`; re-renders it when the update state changes.
+function mountUpdatePanel(root, v) {
+  const box = $('[data-upd-panel]', root)
+  if (!box) return
+  const draw = () => (box.innerHTML = updatePanel())
+  draw()
+  v.onUpdate = draw
+  root.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-upd]')
+    if (!b) return
+    if (b.dataset.upd === 'check') Upd.check(true)
+    else Upd.install()
+  })
 }
 
 function aboutView() {
   setView({})
+  const v = S.view
   const link = (url, text) => `<a data-href="${url}" href="${url}">${text || url.replace('https://', '')}</a>`
-  view.innerHTML = `<div class="page fade-in">
-    <div class="about-head">${$('#rail .logo').innerHTML}<div><h1>dango</h1><p>Version ${esc(S.boot.version)} · a fast desktop anime player for Windows and Linux</p></div></div>
+  view.innerHTML = `<div class="page fade-in" id="about">
+    <div class="about-head">${$('#rail .logo').innerHTML}<div><h1>Tsukimi</h1><p>Version ${esc(S.boot.version)} · a fast desktop anime player for Windows, Linux and macOS · <b>Made by Akulav</b></p></div></div>
+    <div class="panel"><h3>Updates</h3><div data-upd-panel></div></div>
     <div class="panel credits">
       <h3>Credits</h3>
       <p>Made by <b>Akulav</b>, inspired by <b>dango</b> by <b>serifpersia</b>, the original app this one is rebuilt from: ${link('https://github.com/serifpersia/dango')}</p>
@@ -612,14 +787,17 @@ function aboutView() {
         <dt>License</dt><dd>MIT. Original work © 2025 serifpersia, this version © 2026 Akulav.</dd>
       </dl>
     </div>
-    <div class="panel credits"><h3>Note</h3><p>dango doesn't host any video. It plays streams that the providers in the registry find on third-party sites.</p></div>
+    <div class="panel credits"><h3>Note</h3><p>Tsukimi doesn't host any video. It plays streams that the providers in the registry find on third-party sites.</p></div>
   </div>`
+  mountUpdatePanel($('#about'), v)
 }
 
 async function settingsView() {
   setView({})
+  const v = S.view
   const s = (S.settings = await invoke('get_settings'))
   const [providers, stats] = await Promise.all([invoke('providers'), invoke('cache_stats')])
+  if (S.view !== v) return
   const pct = Math.min(100, (stats.bytes / (s.cacheLimitMb * 1024 * 1024)) * 100)
   const sw = (key, label, hint) => `<div class="field"><div class="l"><b>${label}</b><span>${hint}</span></div>
       <label class="switch"><input type="checkbox" data-key="${key}" ${s[key] ? 'checked' : ''}><span></span></label></div>`
@@ -627,7 +805,7 @@ async function settingsView() {
       <input type="number" data-key="${key}" value="${s[key]}" min="${min}" max="${max}"></div>`
   const txt = (key, label, hint, ph = '') => `<div class="field"><div class="l"><b>${label}</b><span>${hint}</span></div>
       <input type="text" data-key="${key}" value="${esc(s[key] ?? '')}" placeholder="${esc(ph)}" spellcheck="false"></div>`
-  view.innerHTML = `<div class="settings fade-in">
+  view.innerHTML = `<div class="settings fade-in" id="settings">
     <h1>Settings</h1>
     <div class="panel">
       <h3>Playback</h3>
@@ -642,18 +820,29 @@ async function settingsView() {
           .join('')}</select></div>
     </div>
     <div class="panel">
+      <h3>Downloads</h3>
+      <div class="field"><div class="l"><b>Downloaded episodes</b><span>Kept until you delete them (Downloads page). Cache cleanup and "Clear" never touch them.</span></div>
+        <span class="chip">${fmtBytes(stats.downloadBytes)}</span></div>
+      ${num('predownloadEpisodes', 'Episodes to pre-download', 'Opening a show caches this many episodes from where you left off (0 = off)', 0, 12)}
+      <div style="margin-top:10px" class="foot"><i class="ic ic-folder" style="width:14px;height:14px"></i><span class="path">${esc(S.boot.paths.downloads)}</span></div>
+    </div>
+    <div class="panel">
       <h3>Buffering &amp; cache</h3>
       ${sw('downloadAhead', 'Download whole episode while playing', 'Segments are saved to disk ahead of the playhead, seeking is instant')}
       ${num('downloadConcurrency', 'Parallel downloads', 'Segments fetched at the same time', 1, 12)}
       ${sw('prefetchNextEpisode', 'Prepare next episode', 'Resolve the next episode near the end of the current one')}
-      ${num('cacheLimitMb', 'Cache size limit (MB)', 'Oldest files are removed above this size', 256, 524288)}
-      ${num('predownloadEpisodes', 'Episodes to pre-download', 'Opening a show downloads this many episodes from where you left off (0 = off)', 0, 12)}
-      ${num('cacheMaxAgeHours', 'Delete downloaded video after (hours)', 'Episodes are removed automatically this long after they were last used', 1, 2160)}
+      ${num('cacheLimitMb', 'Cache size limit (MB)', 'Oldest cached files are removed above this size (downloads don’t count)', 256, 524288)}
+      ${num('cacheMaxAgeHours', 'Remove cached episodes after (hours)', 'Episodes you watched or that were pre-downloaded are removed this long after their last use', 1, 2160)}
       <div class="meter"><i style="width:${pct}%"></i></div>
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><span class="chip">${fmtBytes(stats.bytes)} used · ${stats.files} files</span>
         <span class="chip">video ${fmtBytes(stats.segmentBytes + stats.fileBytes)}</span><span class="chip">images ${fmtBytes(stats.imageBytes)}</span><span class="grow"></span>
-        <button class="btn small" data-cache="sweep">Clean up now</button><button class="btn small" data-cache="video" title="Saved downloads are kept">Clear video cache</button><button class="btn small" data-cache="all" title="Saved downloads are kept">Clear everything</button></div>
-      <div style="margin-top:10px;color:var(--dim);font-size:12px">Cache: ${esc(S.boot.paths.cache)}</div>
+        <button class="btn small" data-cache="sweep">Clean up now</button><button class="btn small" data-cache="video" title="Downloads are kept">Clear video cache</button><button class="btn small" data-cache="all" title="Downloads are kept">Clear everything</button></div>
+      <div style="margin-top:10px" class="foot">Cache: <span class="path">${esc(S.boot.paths.cache)}</span></div>
+    </div>
+    <div class="panel">
+      <h3>Updates</h3>
+      ${sw('checkUpdates', 'Check for updates automatically', 'Shortly after start and every 6 hours. An Update button appears in the sidebar when there is one')}
+      <div style="margin-top:12px" data-upd-panel></div>
     </div>
     <div class="panel">
       <h3>Providers <span class="grow"></span><button class="btn small" id="prov-refresh"><i class="ic ic-refresh"></i>Update</button></h3>
@@ -668,9 +857,12 @@ async function settingsView() {
       ${txt('cfClearance', 'Cloudflare cookie (cf_clearance)', 'Only needed for providers behind Cloudflare, e.g. AnimePahe')}
       ${txt('cfUserAgent', 'Browser user-agent for that cookie', 'Must match the browser the cookie came from')}
     </div>
-    <div style="color:var(--dim);font-size:12px">dango ${esc(S.boot.version)} · made by Akulav, inspired by dango by serifpersia · <a class="ext" href="#/about">About &amp; credits</a> · data: ${esc(S.boot.paths.data)}</div>
+    <div class="foot">Tsukimi ${esc(S.boot.version)} · made by Akulav, inspired by dango by serifpersia · <a class="ext" href="#/about">About &amp; credits</a> · data: <span class="path">${esc(S.boot.paths.data)}</span></div>
   </div>`
 
+  // (listeners go on the page's own element, which is replaced on every visit: none pile up on #view)
+  const root = $('#settings')
+  mountUpdatePanel(root, v)
   const save = debounce(async () => {
     try {
       S.settings = await invoke('set_settings', { settings: S.settings })
@@ -679,7 +871,7 @@ async function settingsView() {
       toast(String(e), true)
     }
   }, 350)
-  view.addEventListener('change', (e) => {
+  root.addEventListener('change', (e) => {
     const el = e.target
     if (el.dataset.key) {
       const k = el.dataset.key
@@ -696,25 +888,30 @@ async function settingsView() {
       save()
     }
   })
-  $('#prov-refresh').onclick = async (e) => {
-    e.currentTarget.disabled = true
+  $('#prov-refresh').addEventListener('click', async (e) => {
+    const b = e.currentTarget
+    b.disabled = true
     try {
       await invoke('refresh_providers')
       toast('Providers updated')
-      settingsView()
+      if (S.view === v) settingsView()
     } catch (err) {
       toast(String(err), true)
-      e.currentTarget.disabled = false
+      b.disabled = false
     }
-  }
-  view.addEventListener('click', async (e) => {
+  })
+  root.addEventListener('click', async (e) => {
     const b = e.target.closest('[data-cache]')
     if (!b) return
     const kind = b.dataset.cache
-    const r =
-      kind === 'sweep' ? await invoke('sweep_cache') : await invoke('clear_cache', { images: kind === 'all' })
-    toast(`Removed ${r.removed} files (${fmtBytes(r.freed)})`)
-    settingsView()
+    b.disabled = true
+    try {
+      const r = kind === 'sweep' ? await invoke('sweep_cache') : await invoke('clear_cache', { images: kind === 'all' })
+      toast(`Removed ${r.removed} files (${fmtBytes(r.freed)})`)
+    } catch (err) {
+      toast(String(err), true)
+    }
+    if (S.view === v) settingsView()
   })
 }
 
@@ -912,7 +1109,7 @@ const Player = {
   // Saves the current episode to disk (kept until deleted).
   download() {
     const d = DL.forShow(this.id).get(this.episode)
-    if (d?.pinned && d.state === 'done') return toast(`EP ${this.episode} is saved on disk`)
+    if (d?.pinned && d.state === 'done') return toast(`EP ${this.episode} is downloaded`)
     saveEpisodes(this.media, this.provider, [this.episode])
   },
 
@@ -1106,7 +1303,7 @@ const Player = {
     const pct = DL.pct(d)
     $('#bar-disk').style.width = `${pct}%`
     $('#disk-note').innerHTML = `<i class="ic ic-disk" style="width:14px;height:14px"></i>${
-      d.state === 'done' ? (d.pinned ? 'saved' : 'on disk') : `${pct.toFixed(0)}% on disk`
+      d.state === 'done' ? (d.pinned ? 'downloaded' : 'on disk') : `${pct.toFixed(0)}% on disk`
     } · ${fmtBytes(d.bytes)}`
   },
 
@@ -1404,5 +1601,7 @@ document.addEventListener('keydown', (e) => {
     document.body.innerHTML = `<div class="empty">Failed to start: ${esc(e)}</div>`
     return
   }
+  Upd.set(S.boot.update)
   route()
+  pollDownloads()
 })()

@@ -5,5 +5,5 @@
 *.ico binary
 
 # Generated/vendored bundles
-crates/dango-core/js/vendor.js linguist-generated -diff
+crates/tsukimi-core/js/vendor.js linguist-generated -diff
 app/ui/vendor/** linguist-vendored -diff

@@ -1,18 +1,18 @@
 //! End-to-end smoke run against the live internet:
 //! search -> probe all providers -> resolve streams -> play through the local proxy.
 //!
-//!   cargo run -p dango-core --example e2e -- "frieren"
+//!   cargo run -p tsukimi-core --example e2e -- "frieren"
 
 use std::time::{Duration, Instant};
 
-use dango_core::{Dango, Paths};
+use tsukimi_core::{Paths, Tsukimi};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    dango_core::init_logging();
+    tsukimi_core::init_logging();
     let query = std::env::args().nth(1).unwrap_or_else(|| "frieren".into());
-    let dir = std::env::temp_dir().join("dango-e2e");
-    let app = Dango::start(Paths { cache: dir.join("cache"), data: dir }).await?;
+    let dir = std::env::temp_dir().join("tsukimi-e2e");
+    let app = Tsukimi::start(Paths::under(dir)).await?;
 
     let t = Instant::now();
     let res = app.search(&query, 1).await?;
@@ -29,11 +29,11 @@ async fn main() -> anyhow::Result<()> {
     let mut rx = app.subscribe_probes();
     let mut snap = app.probe(id).await?;
     while !(snap.done
-        && snap.sources.iter().all(|s| !matches!(s.state, dango_core::resolver::SourceState::Verifying))
+        && snap.sources.iter().all(|s| !matches!(s.state, tsukimi_core::resolver::SourceState::Verifying))
         && snap
             .sources
             .iter()
-            .filter(|s| s.state == dango_core::resolver::SourceState::Ok)
+            .filter(|s| s.state == tsukimi_core::resolver::SourceState::Ok)
             .all(|s| s.playable.is_some()))
     {
         match tokio::time::timeout(Duration::from_secs(60), rx.recv()).await {
@@ -58,7 +58,7 @@ async fn main() -> anyhow::Result<()> {
     // Same fallback the UI uses: walk the ranking until a provider yields streams.
     let mut picked = None;
     for s in
-        snap.sources.iter().filter(|s| s.state == dango_core::resolver::SourceState::Ok && s.playable != Some(false))
+        snap.sources.iter().filter(|s| s.state == tsukimi_core::resolver::SourceState::Ok && s.playable != Some(false))
     {
         let eps = app.episodes(id, &s.provider).await?;
         let ep = eps.first().expect("no episodes").number.clone();

@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- Tsukimi app icon (moon-viewing): a full moon with a play button over susuki grass.
+       Regenerate the icon set: npx @tauri-apps/cli@2 icon app/icons/source.svg -o app/icons -->
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2a2560"/>
+      <stop offset="1" stop-color="#0c0b1d"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0.55" stop-color="#ffe7b3" stop-opacity="0.45"/>
+      <stop offset="1" stop-color="#ffe7b3" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="moon" cx="0.4" cy="0.36" r="0.7">
+      <stop offset="0" stop-color="#fff8e6"/>
+      <stop offset="0.7" stop-color="#ffe2a3"/>
+      <stop offset="1" stop-color="#f4c472"/>
+    </radialGradient>
+  </defs>
+  <rect x="32" y="32" width="960" height="960" rx="216" fill="url(#sky)"/>
+  <circle cx="512" cy="456" r="350" fill="url(#glow)"/>
+  <circle cx="512" cy="456" r="262" fill="url(#moon)"/>
+  <circle cx="420" cy="360" r="34" fill="#f1cf8c" opacity="0.55"/>
+  <circle cx="618" cy="560" r="24" fill="#f1cf8c" opacity="0.5"/>
+  <path d="M452 352 L452 560 L632 456 Z" fill="#2a2560" stroke="#2a2560" stroke-width="28" stroke-linejoin="round"/>
+  <g fill="none" stroke="#e2b766" stroke-width="20" stroke-linecap="round">
+    <path d="M196 900 C 236 780, 250 700, 236 600"/>
+    <path d="M250 910 C 300 800, 340 730, 380 670"/>
+    <path d="M150 905 C 170 820, 150 760, 110 700"/>
+  </g>
+  <g fill="#e2b766">
+    <ellipse cx="236" cy="596" rx="16" ry="44" transform="rotate(-8 236 596)"/>
+    <ellipse cx="384" cy="664" rx="16" ry="44" transform="rotate(38 384 664)"/>
+    <ellipse cx="108" cy="696" rx="16" ry="40" transform="rotate(-40 108 696)"/>
+  </g>
+</svg>

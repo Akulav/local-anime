@@ -1,19 +1,20 @@
 [package]
-name = "dango"
+name = "tsukimi"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "dango: fast desktop anime player"
+authors.workspace = true
+description = "Tsukimi: fast desktop anime player, made by Akulav"
 
 [[bin]]
-name = "dango"
+name = "tsukimi"
 path = "src/main.rs"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-dango-core = { path = "../crates/dango-core" }
+tsukimi-core = { path = "../crates/tsukimi-core" }
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -21,3 +22,4 @@ tokio.workspace = true
 tracing.workspace = true
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
+tauri-plugin-single-instance = "2"

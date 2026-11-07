@@ -816,51 +816,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "914a755b7c2d4af2bdcff7ce1739e2db9a1b81a9b07123d8015786ae03c0980d"
 
 [[package]]
-name = "dango"
-version = "4.0.4"
-dependencies = [
- "anyhow",
- "dango-core",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-opener",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "dango-core"
-version = "4.0.4"
-dependencies = [
- "aes",
- "anyhow",
- "axum",
- "base64 0.22.1",
- "bytes",
- "cbc",
- "directories",
- "futures",
- "hex",
- "hmac",
- "moka",
- "parking_lot",
- "rand 0.8.8",
- "regex",
- "reqwest 0.12.28",
- "rquickjs",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "url",
-]
-
-[[package]]
 name = "darling"
 version = "0.24.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4443,6 +4398,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "tauri-plugin-single-instance"
+version = "2.5.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "726b6da0dd5bd1344f84f4108a622c07d01923baacb5c803a605189672c5352f"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tauri",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+ "windows-sys 0.61.2",
+ "zbus",
+]
+
+[[package]]
 name = "tauri-runtime"
 version = "2.12.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4946,6 +4917,52 @@ name = "try-lock"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
+
+[[package]]
+name = "tsukimi"
+version = "4.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-opener",
+ "tauri-plugin-single-instance",
+ "tokio",
+ "tracing",
+ "tsukimi-core",
+]
+
+[[package]]
+name = "tsukimi-core"
+version = "4.1.0"
+dependencies = [
+ "aes",
+ "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "bytes",
+ "cbc",
+ "directories",
+ "futures",
+ "hex",
+ "hmac",
+ "moka",
+ "parking_lot",
+ "rand 0.8.8",
+ "regex",
+ "reqwest 0.12.28",
+ "rquickjs",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+]
 
 [[package]]
 name = "typeid"

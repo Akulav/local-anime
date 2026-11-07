@@ -341,6 +341,11 @@ impl Store {
         let _ = c.execute("UPDATE downloads SET error = ?2 WHERE key = ?1", params![key, error]);
     }
 
+    pub fn download_clear_error(&self, key: &str) {
+        let c = self.conn.lock();
+        let _ = c.execute("UPDATE downloads SET error = NULL WHERE key = ?1", params![key]);
+    }
+
     pub fn download_touch(&self, key: &str) {
         let c = self.conn.lock();
         let _ = c.execute("UPDATE downloads SET used_at = ?2 WHERE key = ?1", params![key, now_secs()]);
@@ -365,7 +370,7 @@ mod tests {
 
     #[test]
     fn downloads_keep_data_and_only_gain_pin() {
-        let path = std::env::temp_dir().join(format!("dango-store-{}.db", rand::random::<u32>()));
+        let path = std::env::temp_dir().join(format!("tsukimi-store-{}.db", rand::random::<u32>()));
         let s = Store::open(&path).unwrap();
         let mut d = DownloadRecord {
             key: "k".into(),

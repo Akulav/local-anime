@@ -1,7 +1,7 @@
 {
-  "name": "dango-js-vendor",
+  "name": "tsukimi-js-vendor",
   "private": true,
-  "description": "Builds crates/dango-core/js/vendor.js (cheerio + Buffer) for the embedded QuickJS provider runtime and copies hls.js into app/ui/vendor.",
+  "description": "Builds crates/tsukimi-core/js/vendor.js (cheerio + Buffer) for the embedded QuickJS provider runtime and copies hls.js into app/ui/vendor.",
   "type": "module",
   "scripts": {
     "build": "node build.mjs"

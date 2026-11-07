@@ -1,5 +1,5 @@
 [package]
-name = "dango-core"
+name = "tsukimi-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

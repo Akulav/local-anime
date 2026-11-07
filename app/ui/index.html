@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>dango</title>
+    <title>Tsukimi</title>
     <link rel="stylesheet" href="app.css" />
     <script src="vendor/hls.min.js" defer></script>
     <script src="app.js" type="module"></script>
@@ -11,21 +11,32 @@
   <body>
     <div id="app">
       <nav id="rail" aria-label="Main">
-        <a class="logo" href="#/" title="dango">
+        <a class="logo" href="#/" title="Tsukimi">
           <svg viewBox="0 0 64 64" aria-hidden="true">
-            <line x1="14" y1="52" x2="52" y2="12" stroke="#c4965f" stroke-width="4" stroke-linecap="round" />
-            <circle cx="22" cy="44" r="9.5" fill="#8bd38a" />
-            <circle cx="32" cy="33" r="9.5" fill="#f6f1ea" />
-            <circle cx="42" cy="22" r="9.5" fill="#ff8fb8" />
+            <defs>
+              <radialGradient id="lg-moon" cx="0.4" cy="0.36" r="0.7">
+                <stop offset="0" stop-color="#fff8e6" />
+                <stop offset="0.7" stop-color="#ffe2a3" />
+                <stop offset="1" stop-color="#f4c472" />
+              </radialGradient>
+            </defs>
+            <circle cx="32" cy="30" r="21" fill="#f5c97a" opacity="0.16" />
+            <circle cx="32" cy="30" r="16.5" fill="url(#lg-moon)" />
+            <path d="M28.5 23.5v13l10.5-6.5z" fill="#2a2560" stroke="#2a2560" stroke-width="1.6" stroke-linejoin="round" />
+            <path d="M13 58c2.5-7 3.4-12 2.5-18M17 58.5c3-6.5 5.5-11 8-14.5M10 58c1-5-.2-8.7-2.6-12.4" fill="none" stroke="#e2b766" stroke-width="1.6" stroke-linecap="round" />
           </svg>
         </a>
-        <a href="#/" data-nav="home" title="Home (g h)"><i class="ic ic-home"></i><span>Home</span></a>
+        <a href="#/" data-nav="home" title="Home"><i class="ic ic-home"></i><span>Home</span></a>
         <a href="#/search" data-nav="search" title="Search (/)"><i class="ic ic-search"></i><span>Search</span></a>
         <a href="#/library" data-nav="library" title="Library"><i class="ic ic-lib"></i><span>Library</span></a>
         <a href="#/downloads" data-nav="downloads" title="Downloads"><i class="ic ic-disk"></i><span>Downloads</span></a>
         <div class="grow"></div>
+        <button id="rail-update" class="rail-update hidden" type="button" title="A new version of Tsukimi is available">
+          <i class="ic ic-up"></i><span>Update</span>
+        </button>
         <a href="#/settings" data-nav="settings" title="Settings"><i class="ic ic-gear"></i><span>Settings</span></a>
         <a href="#/about" data-nav="about" title="About"><i class="ic ic-info"></i><span>About</span></a>
+        <a class="by" href="#/about" title="Made by Akulav">by<br />Akulav</a>
       </nav>
       <main id="main">
         <header id="topbar">
@@ -76,7 +87,7 @@
           <button class="pbtn txt" data-menu="quality" title="Quality">Auto</button>
           <button class="pbtn txt" data-menu="subs" title="Subtitles (c)">CC</button>
           <button class="pbtn txt" data-menu="speed" title="Speed">1×</button>
-          <button class="pbtn" data-act="download" title="Download to watch later (d)"><i class="ic ic-disk"></i></button>
+          <button class="pbtn" data-act="download" title="Download to keep (d)"><i class="ic ic-disk"></i></button>
           <button class="pbtn" data-act="episodes" title="Episodes (e)"><i class="ic ic-list"></i></button>
           <button class="pbtn" data-act="fullscreen" title="Fullscreen (f)"><i class="ic ic-full"></i></button>
         </div>

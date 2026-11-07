@@ -208,6 +208,9 @@ pub struct StreamInner {
     seg_dir: PathBuf,
     file_dir: PathBuf,
     img_dir: PathBuf,
+    /// Finished downloads are moved here (same layout as the cache), out of the janitor's reach.
+    keep_seg_dir: PathBuf,
+    keep_file_dir: PathBuf,
     token: String,
     base: RwLock<String>,
     playlists_vod: moka::sync::Cache<String, Arc<Playlist>>,
@@ -368,6 +371,23 @@ fn touch(path: &Path) {
     if let Ok(f) = std::fs::File::options().write(true).open(path) {
         let _ = f.set_modified(SystemTime::now());
     }
+}
+
+/// Moves a file (rename, or copy + delete across drives) without ever leaving a partial target:
+/// a copy goes to a temp name first.
+fn move_file(from: &Path, to: &Path) -> std::io::Result<()> {
+    if let Some(dir) = to.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    if std::fs::rename(from, to).is_ok() {
+        return Ok(());
+    }
+    let tmp = to.with_extension(format!("{}.tmp", rand::random::<u32>()));
+    std::fs::copy(from, &tmp)?;
+    std::fs::rename(&tmp, to).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })?;
+    std::fs::remove_file(from)
 }
 
 impl StreamInner {
@@ -592,7 +612,7 @@ impl StreamInner {
             if let Err(e) = self.saved_playlist(src) {
                 tracing::warn!("saved playlist unusable: {e:#}");
             }
-        } else if !self.file_done_path(&src.spec).exists() {
+        } else if self.file_on_disk(&src.spec).is_none() {
             self.file_job(&src.spec);
         }
     }
@@ -645,14 +665,45 @@ impl StreamInner {
         self.rewrite(&src.body, &src.final_url, &src.spec, "").ok().and_then(|(p, _)| p.segs).unwrap_or_default()
     }
 
-    /// Every file a saved download consists of (blocking-free, no disk access).
+    /// Every cache file a saved download consists of (blocking-free, no disk access).
     pub fn saved_paths(&self, src: &SavedSource) -> Vec<PathBuf> {
+        self.file_pairs(src).into_iter().map(|(cache, _)| cache).chain(self.part_path(src)).collect()
+    }
+
+    /// Every file a saved download may have, in the cache and in the downloads folder.
+    pub fn all_saved_paths(&self, src: &SavedSource) -> Vec<PathBuf> {
+        self.file_pairs(src).into_iter().flat_map(|(cache, kept)| [cache, kept]).chain(self.part_path(src)).collect()
+    }
+
+    fn part_path(&self, src: &SavedSource) -> Option<PathBuf> {
+        (src.kind != "hls").then(|| self.file_dir.join(format!("{}.part", sha_key(&src.spec.url))))
+    }
+
+    /// (cache path, downloads-folder path) of every finished file of a saved download.
+    fn file_pairs(&self, src: &SavedSource) -> Vec<(PathBuf, PathBuf)> {
         if src.kind == "hls" {
-            self.saved_segs(src).iter().map(|s| self.seg_path(&s.url)).collect()
+            self.saved_segs(src).iter().map(|s| (self.seg_path(&s.url), self.kept_seg_path(&s.url))).collect()
         } else {
-            let key = sha_key(&src.spec.url);
-            vec![self.file_dir.join(format!("{key}.bin")), self.file_dir.join(format!("{key}.part"))]
+            vec![(self.file_done_path(&src.spec), self.kept_file_path(&src.spec))]
         }
+    }
+
+    /// Moves a finished download's files from the cache into the downloads folder, where cache
+    /// cleanup never looks (`keep = true`), or back into the cache so they expire like any other
+    /// cached video (`keep = false`). Files already in place are left alone. Blocking.
+    pub fn keep_files(&self, src: &SavedSource, keep: bool) -> usize {
+        let mut moved = 0;
+        for (cache, kept) in self.file_pairs(src) {
+            let (from, to) = if keep { (cache, kept) } else { (kept, cache) };
+            if !from.exists() || to.exists() {
+                continue;
+            }
+            match move_file(&from, &to) {
+                Ok(()) => moved += 1,
+                Err(e) => tracing::warn!("could not move {} to {}: {e}", from.display(), to.display()),
+            }
+        }
+        moved
     }
 
     /// What of a saved download is on disk right now. Does blocking file system calls.
@@ -662,15 +713,21 @@ impl StreamInner {
             let segs = self.saved_segs(src);
             p.total = segs.len() as u64;
             for s in &segs {
-                if let Ok(m) = std::fs::metadata(self.seg_path(&s.url)) {
+                if let Some((_, n)) = self.seg_on_disk(&s.url) {
                     p.done += 1;
-                    p.bytes += m.len();
+                    p.bytes += n;
                 }
             }
-        } else if let Ok(m) = std::fs::metadata(self.file_done_path(&src.spec)) {
-            (p.total, p.done, p.bytes) = (m.len(), m.len(), m.len());
+        } else if let Some((_, n)) = self.file_on_disk(&src.spec) {
+            (p.total, p.done, p.bytes) = (n, n, n);
         }
         p
+    }
+
+    /// Whether every file of a saved download is in the downloads folder. Blocking.
+    pub fn fully_kept(&self, src: &SavedSource) -> bool {
+        let pairs = self.file_pairs(src);
+        !pairs.is_empty() && pairs.iter().all(|(_, kept)| kept.exists())
     }
 
     async fn serve_saved(self: &Arc<Self>, kind: &str, data: &str, headers: &HeaderMap) -> Response<Body> {
@@ -793,9 +850,9 @@ impl StreamInner {
         let this = self.clone();
         tokio::spawn(async move {
             // Segments already on disk (earlier sessions, other downloads) count right away.
-            let paths: Vec<PathBuf> = job.segs.iter().map(|s| this.seg_path(&s.url)).collect();
+            let (this2, job2) = (this.clone(), job.clone());
             let sizes = tokio::task::spawn_blocking(move || {
-                paths.iter().map(|p| std::fs::metadata(p).map(|m| m.len()).ok()).collect::<Vec<_>>()
+                job2.segs.iter().map(|s| this2.seg_on_disk(&s.url).map(|(_, n)| n)).collect::<Vec<_>>()
             })
             .await
             .unwrap_or_default();
@@ -870,13 +927,31 @@ impl StreamInner {
         }
     }
 
+    /// Where a segment is cached (and where a download writes it).
     fn seg_path(&self, url: &str) -> PathBuf {
         let k = sha_key(url);
         self.seg_dir.join(&k[..2]).join(k)
     }
 
+    /// Where a segment of a finished download is kept.
+    fn kept_seg_path(&self, url: &str) -> PathBuf {
+        let k = sha_key(url);
+        self.keep_seg_dir.join(&k[..2]).join(k)
+    }
+
+    /// The segment's file and size if it is on disk (downloads first, then the cache). Blocking.
+    fn seg_on_disk(&self, url: &str) -> Option<(PathBuf, u64)> {
+        [self.kept_seg_path(url), self.seg_path(url)]
+            .into_iter()
+            .find_map(|p| std::fs::metadata(&p).ok().map(|m| (p, m.len())))
+    }
+
     /// Returns the on-disk path of a segment, downloading it once if needed.
     async fn segment(self: &Arc<Self>, spec: &Upstream) -> Result<(PathBuf, u64), String> {
+        let kept = self.kept_seg_path(&spec.url);
+        if let Ok(m) = tokio::fs::metadata(&kept).await {
+            return Ok((kept, m.len()));
+        }
         let path = self.seg_path(&spec.url);
         if let Ok(m) = tokio::fs::metadata(&path).await {
             return Ok((path, m.len()));
@@ -980,6 +1055,17 @@ impl StreamInner {
         self.file_dir.join(format!("{}.bin", sha_key(&spec.url)))
     }
 
+    fn kept_file_path(&self, spec: &Upstream) -> PathBuf {
+        self.keep_file_dir.join(format!("{}.bin", sha_key(&spec.url)))
+    }
+
+    /// The finished file and its size (downloads folder first, then the cache). Blocking.
+    fn file_on_disk(&self, spec: &Upstream) -> Option<(PathBuf, u64)> {
+        [self.kept_file_path(spec), self.file_done_path(spec)]
+            .into_iter()
+            .find_map(|p| std::fs::metadata(&p).ok().map(|m| (p, m.len())))
+    }
+
     fn file_job(self: &Arc<Self>, spec: &Upstream) -> Arc<FileJob> {
         let key = sha_key(&spec.url);
         let mut files = self.files.lock();
@@ -1081,6 +1167,10 @@ impl StreamInner {
     }
 
     async fn serve_file(self: &Arc<Self>, spec: Upstream, headers: &HeaderMap) -> Response<Body> {
+        let kept = self.kept_file_path(&spec);
+        if let Ok(m) = tokio::fs::metadata(&kept).await {
+            return serve_disk_range(kept, m.len(), headers).await;
+        }
         let done = self.file_done_path(&spec);
         if let Ok(m) = tokio::fs::metadata(&done).await {
             touch(&done);
@@ -1394,6 +1484,7 @@ async fn preflight() -> Response<Body> {
 impl StreamServer {
     pub async fn start(
         cache_dir: &Path,
+        downloads_dir: &Path,
         http: Http,
         providers: Arc<Providers>,
         settings: Arc<RwLock<Settings>>,
@@ -1406,6 +1497,8 @@ impl StreamServer {
             seg_dir: cache_dir.join("segments"),
             file_dir: cache_dir.join("files"),
             img_dir: cache_dir.join("images"),
+            keep_seg_dir: downloads_dir.join("segments"),
+            keep_file_dir: downloads_dir.join("files"),
             token: token.clone(),
             base: RwLock::new(String::new()),
             playlists_vod: moka::sync::Cache::builder()
@@ -1419,7 +1512,7 @@ impl StreamServer {
             files: Mutex::new(HashMap::new()),
             saved: RwLock::new(HashMap::new()),
         });
-        for d in [&inner.seg_dir, &inner.file_dir, &inner.img_dir] {
+        for d in [&inner.seg_dir, &inner.file_dir, &inner.img_dir, &inner.keep_seg_dir, &inner.keep_file_dir] {
             tokio::fs::create_dir_all(d).await?;
         }
         // Leftover partial downloads from a previous run cannot be resumed.
