@@ -41,6 +41,7 @@ crates/tsukimi-core/       all logic, no UI dependency
   tests/downloads.rs       finished downloads leave the cache and survive cleanup
   tests/threads.rs         sync commands on a non-runtime thread must not panic
   examples/e2e.rs          live end-to-end pipeline smoke run
+  examples/stress_app.rs   minutes of parallel search/probe/streams: catches heap corruption (prints "survived")
 app/                       Tauri shell (package + binary `tsukimi`)
   src/main.rs              tauri commands → Tsukimi methods; probe events; single instance; --version
   src/install.rs           Linux self-install (~/.local/share/tsukimi + .desktop), --here, --uninstall
@@ -156,13 +157,22 @@ Upstream headers: the spec's referer/origin/ua/cookie, then the registry proxy r
   context, or runtimes created/evaluated on several threads at once, corrupt the QuickJS heap (rquickjs 0.9,
   `parallel`). `JsProvider::call` holds `calls`, `JsProvider::load` holds the static `LOADING`. Regression check:
   `METHOD=resolveShowId cargo run --release -p tsukimi-core --example stress_provider -- animeya 3 25`.
+- **All QuickJS work runs on one thread** (`js::engine()`, "tsukimi-js", a current-thread runtime): loads, calls
+  (`on_engine`) and every runtime's `drive()`. Letting runtimes hop between tokio workers corrupted the heap within
+  minutes of busy searching (0xC0000374). Host functions do network work on the app runtime (`HostServices::io`),
+  never on the engine thread. Regression check: `cargo run --release -p tsukimi-core --example stress_app -- 8`
+  must print "survived" (check the real exit code with `Start-Process -PassThru`; cmd expands `%ERRORLEVEL%` too
+  early).
+- Windows: `tsukimi.exe --watch-exit <pid>` is the hidden watcher started at launch; it writes abnormal exit codes
+  to `crash.log` / `tsukimi.log`. WER may be disabled on users' machines, so it's the only trace of a fail-fast.
 - QuickJS's stack limit (`set_max_stack_size`, 1 MiB) must stay below the thread stack (tokio workers: 2 MiB), or deep
   provider recursion overflows the real stack and the process dies without a trace.
 - Tests that `Tsukimi::start` must not drop their tokio runtime (`std::mem::forget(rt)`): background provider loading
   would be cancelled mid-flight.
 - A crash that leaves neither `crash.log` nor a log line is a fail-fast (heap corruption, stack overflow); get the exit
   code by running a release example under `cmd /c "… & echo %ERRORLEVEL%"` (0xC0000374 = heap corruption).
-- Host async functions spawn their real work on tokio (`tokio::spawn`), so network I/O isn't tied to the JS lock.
+- Host async functions spawn their real work on the app runtime (`host().io.spawn`), so network I/O isn't tied to
+  the JS lock or the engine thread.
 - **Don't `tokio::spawn` from `Tsukimi` methods; use `self.rt.spawn`.** Plain `#[tauri::command]`s run on the UI thread
   outside the runtime, where `tokio::spawn` panics, and release builds use `panic = "abort"`, so the app just
   disappears (this crashed playback once, see `tests/threads.rs`). Commands that do real work are

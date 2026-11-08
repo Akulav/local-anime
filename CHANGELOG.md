@@ -7,6 +7,18 @@ pushed to `main`, GitHub Actions tags, builds and publishes the release.
 
 ## [Unreleased]
 
+### Fixed
+- **The window still vanished at random** while searching, browsing or watching (nothing in the logs, no
+  `crash.log`): the JavaScript engines that run the providers corrupted the process heap (STATUS_HEAP_CORRUPTION)
+  when their work hopped between threads. Reproduced in about 2–3 minutes of busy searching (`examples/stress_app`).
+  Every provider engine now runs on one dedicated thread, while network transfers stay on the normal thread pool.
+  A provider call that the app stops waiting for keeps running to the end instead of being cut off halfway.
+
+### Added
+- Windows: when Tsukimi ends abnormally, its exit code and what it means are written to `crash.log` and
+  `tsukimi.log` by a small hidden watcher process, so crashes that skip every in-process handler (heap corruption,
+  `abort`, stack overflow) leave a trace even when Windows Error Reporting is turned off.
+
 ## [4.1.2] - 2026-11-08
 
 ### Changed

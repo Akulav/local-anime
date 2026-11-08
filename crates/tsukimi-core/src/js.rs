@@ -25,20 +25,57 @@ pub struct HostServices {
     pub http: Http,
     pub anilist: Arc<Anilist>,
     cache: moka::sync::Cache<String, (Arc<str>, Instant)>,
+    /// The app's multi-threaded runtime: network work of the host functions runs here, so it
+    /// never waits for JavaScript on the engine thread.
+    io: tokio::runtime::Handle,
 }
 
 static HOST: OnceLock<Arc<HostServices>> = OnceLock::new();
 
+/// Must be called from inside the app's tokio runtime.
 pub fn init_host(http: Http, anilist: Arc<Anilist>) {
     let _ = HOST.set(Arc::new(HostServices {
         http,
         anilist,
         cache: moka::sync::Cache::builder().max_capacity(20_000).time_to_live(Duration::from_secs(24 * 3600)).build(),
+        io: tokio::runtime::Handle::current(),
     }));
 }
 
 fn host() -> &'static Arc<HostServices> {
     HOST.get().expect("js host services not initialised")
+}
+
+/// Every QuickJS runtime lives on this one thread.
+///
+/// rquickjs 0.9's `parallel` mode lets runtimes migrate between tokio workers, and in practice
+/// that corrupts the heap (STATUS_HEAP_CORRUPTION, the process just disappears): with all
+/// providers probing at once the app died within minutes (examples/stress_app). Pinning every
+/// runtime, its `drive()` task and every call to a single current-thread runtime removes that
+/// whole class of bugs. JavaScript here is short bursts between network waits, and the network
+/// itself runs on the app's runtime (`HostServices::io`), so one thread is plenty.
+fn engine() -> &'static tokio::runtime::Handle {
+    static ENGINE: OnceLock<tokio::runtime::Handle> = OnceLock::new();
+    ENGINE.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::Builder::new()
+            .name("tsukimi-js".into())
+            // Well above QuickJS's own 1 MiB limit (`set_max_stack_size`).
+            .stack_size(16 * 1024 * 1024)
+            .spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("js engine runtime");
+                let _ = tx.send(rt.handle().clone());
+                rt.block_on(std::future::pending::<()>());
+            })
+            .expect("js engine thread");
+        rx.recv().expect("js engine thread started")
+    })
+}
+
+/// Runs `fut` to completion on the engine thread. Dropping the returned future does not cancel
+/// it, which also keeps `async_with!` futures from ever being dropped mid-flight.
+async fn on_engine<T: Send + 'static>(fut: impl std::future::Future<Output = T> + Send + 'static) -> Result<T> {
+    engine().spawn(fut).await.map_err(|e| anyhow!("js engine task failed: {e}"))
 }
 
 /// Drops all provider-level cache entries (used by "clear cache").
@@ -70,7 +107,7 @@ pub struct JsProvider {
     /// One call at a time per provider. Two `async_with!` calls interleaving on the same context
     /// (rquickjs 0.9, `parallel`) corrupt the QuickJS heap: two concurrent `resolveShowId` calls on
     /// AnimeYa crashed the app with STATUS_HEAP_CORRUPTION within seconds (examples/stress_provider).
-    calls: tokio::sync::Mutex<()>,
+    calls: Arc<tokio::sync::Mutex<()>>,
 }
 
 fn js_error(ctx: &Ctx<'_>, err: rquickjs::Error) -> String {
@@ -203,8 +240,8 @@ fn install_host<'js>(ctx: &Ctx<'js>, provider_id: &str) -> rquickjs::Result<()> 
                 let (meta, body) = match parsed {
                     Ok(r) => {
                         let http = host().http.clone();
-                        // Run on the tokio pool so the transfer progresses independently of the JS lock.
-                        match tokio::spawn(async move { http.js_request(r).await }).await {
+                        // Run on the app's pool so the transfer progresses independently of the engine.
+                        match host().io.spawn(async move { http.js_request(r).await }).await {
                             Ok(x) => x,
                             Err(e) => return Ok::<Vec<String>, rquickjs::Error>(vec![
                                 serde_json::json!({ "status": 0, "url": "", "headers": [], "error": e.to_string() }).to_string(),
@@ -243,7 +280,7 @@ fn install_host<'js>(ctx: &Ctx<'js>, provider_id: &str) -> rquickjs::Result<()> 
             Async(|query: String, vars: String| async move {
                 let al = host().anilist.clone();
                 let vars: Value = serde_json::from_str(&vars).unwrap_or(Value::Null);
-                let r = tokio::spawn(async move { al.request(&query, &vars, 3600).await }).await.ok().flatten();
+                let r = host().io.spawn(async move { al.request(&query, &vars, 3600).await }).await.ok().flatten();
                 Ok::<Option<String>, rquickjs::Error>(r.map(|v| v.to_string()))
             }),
         )?,
@@ -320,6 +357,11 @@ static LOADING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 impl JsProvider {
     pub async fn load(id: &str, source: String) -> Result<Self> {
+        on_engine(Self::load_on_engine(id.to_string(), source)).await?
+    }
+
+    async fn load_on_engine(id: String, source: String) -> Result<Self> {
+        let id = id.as_str();
         let _one_at_a_time = LOADING.lock().await;
         let rt = AsyncRuntime::new().context("quickjs runtime")?;
         rt.set_memory_limit(384 * 1024 * 1024).await;
@@ -340,7 +382,8 @@ impl JsProvider {
         .await
         .map_err(|e| anyhow!(e))?;
 
-        // Keep timers and host futures moving even when no call is awaiting.
+        // Keep timers and host futures moving even when no call is awaiting (on the engine thread,
+        // like everything else touching this runtime).
         tokio::spawn(rt.drive());
 
         let module_name = format!("{id}.mjs");
@@ -365,7 +408,7 @@ impl JsProvider {
             caps,
             ctx: std::mem::ManuallyDrop::new(ctx),
             _rt: std::mem::ManuallyDrop::new(rt),
-            calls: tokio::sync::Mutex::new(()),
+            calls: Arc::new(tokio::sync::Mutex::new(())),
         })
     }
 
@@ -373,8 +416,8 @@ impl JsProvider {
     ///
     /// The timeout is enforced inside JS (a race against a host timer) so the Rust future
     /// always runs to completion under the runtime lock; dropping it mid-flight is unsound.
-    /// Calls to the same provider run one after another (see `calls`); waiting for the turn is
-    /// outside `async_with!`, so dropping a waiting call is fine.
+    /// Calls to the same provider run one after another (see `calls`). The whole call runs as a
+    /// task on the engine thread, so a caller that gives up (dropped future) never cancels it.
     pub async fn call(
         &self,
         method: &str,
@@ -382,22 +425,27 @@ impl JsProvider {
         request_ctx: Option<Value>,
         timeout: Duration,
     ) -> Result<Value> {
-        let _turn = self.calls.lock().await;
         let m = method.to_string();
         let a = args.to_string();
         let rc = request_ctx.map(|v| v.to_string()).unwrap_or_default();
         let ms = timeout.as_millis() as f64;
-        let s = async_with!(self.ctx => |ctx| {
-            let r: rquickjs::Result<String> = async {
-                let d: Object = ctx.globals().get("__dango")?;
-                let f: Function = d.get("call")?;
-                let p: Promise = f.call((This(d.clone()), m, a, rc, ms))?;
-                p.into_future::<String>().await
-            }
-            .await;
-            r.map_err(|e| js_error(&ctx, e))
+        let context = (*self.ctx).clone();
+        let calls = self.calls.clone();
+        let s = on_engine(async move {
+            let _turn = calls.lock_owned().await;
+            async_with!(context => |ctx| {
+                let r: rquickjs::Result<String> = async {
+                    let d: Object = ctx.globals().get("__dango")?;
+                    let f: Function = d.get("call")?;
+                    let p: Promise = f.call((This(d.clone()), m, a, rc, ms))?;
+                    p.into_future::<String>().await
+                }
+                .await;
+                r.map_err(|e| js_error(&ctx, e))
+            })
+            .await
         })
-        .await
+        .await?
         .map_err(|e| anyhow!(e))?;
         Ok(serde_json::from_str(&s)?)
     }

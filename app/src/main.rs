@@ -262,6 +262,11 @@ fn main() {
         println!("Tsukimi {} (made by Akulav)", tsukimi_core::VERSION);
         return;
     }
+    #[cfg(windows)]
+    if let Some(pid) = exit_watch::requested() {
+        exit_watch::run(pid);
+        return;
+    }
     // Linux: the downloaded program installs itself (app menu) on its first start; also handles
     // --uninstall. Returns false when this process should end (the installed copy took over).
     if !install::first_run() {
@@ -273,6 +278,8 @@ fn main() {
     }
     tracing::info!("Tsukimi {} starting on {}", tsukimi_core::VERSION, std::env::consts::OS);
     install_crash_log();
+    #[cfg(windows)]
+    exit_watch::spawn();
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| show_main(app)))
         .plugin(tauri_plugin_opener::init())
@@ -396,5 +403,98 @@ mod native_crash {
     pub fn install(log: std::path::PathBuf) {
         let _ = LOG.set(log);
         unsafe { SetUnhandledExceptionFilter(Some(filter)) };
+    }
+}
+
+/// Fail-fast exits (heap corruption, `abort`, stack overflow) bypass every in-process handler, and
+/// with Windows Error Reporting disabled they leave no trace at all: the window just vanishes. A
+/// tiny hidden copy of the program (`--watch-exit <pid>`) waits for the app and records any
+/// abnormal exit code in `crash.log` and `tsukimi.log`.
+#[cfg(windows)]
+mod exit_watch {
+    use std::ffi::c_void;
+    use std::io::Write;
+
+    const FLAG: &str = "--watch-exit";
+    const SYNCHRONIZE: u32 = 0x0010_0000;
+    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+    const INFINITE: u32 = 0xFFFF_FFFF;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    extern "system" {
+        fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut c_void;
+        fn WaitForSingleObject(handle: *mut c_void, ms: u32) -> u32;
+        fn GetExitCodeProcess(handle: *mut c_void, code: *mut u32) -> i32;
+        fn CloseHandle(handle: *mut c_void) -> i32;
+    }
+
+    pub fn requested() -> Option<u32> {
+        let mut args = std::env::args().skip(1);
+        (args.next()? == FLAG).then(|| args.next()?.parse().ok()).flatten()
+    }
+
+    pub fn spawn() {
+        use std::os::windows::process::CommandExt;
+        let Ok(exe) = std::env::current_exe() else { return };
+        let r = std::process::Command::new(exe)
+            .arg(FLAG)
+            .arg(std::process::id().to_string())
+            .creation_flags(CREATE_NO_WINDOW)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+        if let Err(e) = r {
+            tracing::warn!("exit watcher not started: {e}");
+        }
+    }
+
+    fn meaning(code: u32) -> &'static str {
+        match code {
+            0xC000_0409 => "fail-fast: abort(), a corrupted heap or a security check (no handler runs)",
+            0xC000_0374 => "heap corruption",
+            0xC000_00FD => "stack overflow",
+            0xC000_0005 => "access violation",
+            0xC000_001D => "illegal instruction",
+            0xC000_0017 | 0xC000_012D => "out of memory",
+            0xE06D_7363 => "unhandled C++ exception (native library, e.g. WebView2)",
+            3 => "C runtime abort()",
+            1 | 0xFFFF_FFFF => "killed from outside (Task Manager, taskkill, Stop-Process) or error exit",
+            _ => "unknown",
+        }
+    }
+
+    pub fn run(pid: u32) {
+        let code = unsafe {
+            let h = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if h.is_null() {
+                return;
+            }
+            WaitForSingleObject(h, INFINITE);
+            let mut code = 0u32;
+            let ok = GetExitCodeProcess(h, &mut code);
+            CloseHandle(h);
+            if ok == 0 {
+                return;
+            }
+            code
+        };
+        if code == 0 {
+            return;
+        }
+        let Ok(paths) = tsukimi_core::Paths::resolve() else { return };
+        let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let line = format!(
+            "Tsukimi {} (pid {pid}) ended abnormally: exit code 0x{code:08X} ({})",
+            tsukimi_core::VERSION,
+            meaning(code)
+        );
+        let append = |name: &str, text: String| {
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(paths.data.join(name)) {
+                let _ = f.write_all(text.as_bytes());
+            }
+        };
+        append("crash.log", format!("--- {line} (unix {secs})\n"));
+        append("tsukimi.log", format!("{line}\n"));
     }
 }
