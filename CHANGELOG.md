@@ -7,6 +7,8 @@ pushed to `main`, GitHub Actions tags, builds and publishes the release.
 
 ## [Unreleased]
 
+## [4.1.3] - 2026-11-09
+
 ### Fixed
 - **The window still vanished at random** while searching, browsing or watching (nothing in the logs, no
   `crash.log`): the JavaScript engines that run the providers corrupted the process heap (STATUS_HEAP_CORRUPTION)
