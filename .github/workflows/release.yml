@@ -6,12 +6,12 @@ name: Release
 # already has its tag is skipped, so nothing is published twice. The workflow never pushes commits.
 # "Run workflow" on the Actions page does the same for the current version (e.g. after a failed run).
 #
-# One file per system, and the same file installs and updates (crates/tsukimi-core/src/updater.rs downloads it):
+# Exactly three programs, one per system, and the same file installs and updates
+# (crates/tsukimi-core/src/updater.rs downloads it):
 #   Tsukimi-setup.exe          Windows: the setup wizard (Inno Setup, app/installer/tsukimi.iss) - also the update
 #   tsukimi-linux-x64          Linux: the program; it installs itself (app menu entry) on its first start
-#   tsukimi-macos-arm64        macOS: the program, what an update downloads
-#   Tsukimi-macos-arm64.dmg    macOS: Tsukimi.app to drag into Applications (the first install)
-#   SHA256SUMS.txt             checksums of all of them: an update refuses a file that doesn't match
+#   tsukimi-macos-arm64        macOS: the program; it installs itself as ~/Applications/Tsukimi.app on its first start
+#   SHA256SUMS.txt             checksums of the three: an update refuses a file that doesn't match
 # The release notes are the version's section of CHANGELOG.md (scripts/release-notes.ps1).
 
 on:
@@ -132,18 +132,9 @@ jobs:
           $v = "${{ needs.check.outputs.version }}"
           & $iscc /Qp "/DAppVersion=$v" "/DExe=$PWD\target\release\tsukimi.exe" "/O$PWD\dist" app\installer\tsukimi.iss
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: macOS app in a disk image (Tsukimi-macos-arm64.dmg)
+      - name: macOS program, signed ad hoc (it builds ~/Applications/Tsukimi.app itself on first start)
         if: runner.os == 'macOS'
-        run: |
-          v="${{ needs.check.outputs.version }}"
-          app="dmg/Tsukimi.app"
-          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
-          cp target/release/tsukimi "$app/Contents/MacOS/tsukimi"
-          cp app/icons/icon.icns "$app/Contents/Resources/icon.icns"
-          sed "s/@VERSION@/$v/g" app/installer/Info.plist > "$app/Contents/Info.plist"
-          codesign --force --deep --sign - "$app"   # (ad hoc: no certificate; macOS asks once on first open)
-          ln -s /Applications dmg/Applications
-          hdiutil create -volname Tsukimi -srcfolder dmg -ov -format UDZO dist/Tsukimi-macos-arm64.dmg
+        run: codesign --force --sign - dist/tsukimi-macos-arm64
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.name }}

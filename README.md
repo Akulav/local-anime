@@ -50,7 +50,7 @@ Anime sources available on the [dango provider registry](https://github.com/seri
 | 💾 **Downloads that stay** | A downloaded episode lives in its own folder that cache cleanup never touches. It plays from disk with no buffering, even after the provider's links expire, until you delete it. |
 | ⚡ **No buffering** | Playback goes through a local streaming cache that downloads the whole episode ahead of the playhead, so seeking is instant. |
 | 🔄 **Keeps itself current** | Checks GitHub for a new Tsukimi. One click downloads it, verifies its checksum, installs and restarts. |
-| 📦 **One program** | A setup wizard on Windows, an app in a disk image on a Mac, a single file on Linux. No browser tab, no server to run. |
+| 📦 **One program** | Three files, one per system: a setup wizard on Windows, a single program on Linux and on a Mac that installs itself. The same file installs and updates. No browser tab, no server to run. |
 
 ## 🎀 Features
 
@@ -90,7 +90,7 @@ Anime sources available on the [dango provider registry](https://github.com/seri
 | System | File | Where Tsukimi lives | Shortcuts |
 |---|---|---|---|
 | Windows | `Tsukimi-setup.exe`: a wizard with a license page, a folder you can change and a *desktop shortcut* choice; per user, no administrator rights | `%LOCALAPPDATA%\Programs\Tsukimi` | Start menu, desktop, *Settings → Apps* |
-| macOS | `Tsukimi-macos-arm64.dmg`: drag Tsukimi to Applications | Applications | Launchpad, Spotlight |
+| macOS | `tsukimi-macos-arm64`: `chmod +x` it and run it; it installs itself on its first start | `~/Applications/Tsukimi.app` | Launchpad, Spotlight |
 | Linux | `tsukimi-linux-x64`: `chmod +x` it and run it; it installs itself on its first start | `~/.local/share/tsukimi` | app menu, desktop |
 
 | Your data | Windows | Linux | macOS |
@@ -118,14 +118,14 @@ A copy you built yourself never replaces itself with a download.
 | System | How |
 |---|---|
 | Windows | *Settings → Apps → Tsukimi → Uninstall*, or Start menu → *Uninstall Tsukimi*. It asks whether to delete your library and downloads too (default: keep). |
-| macOS | Drag Tsukimi from Applications to the Bin; delete the folders above to remove the data. |
+| macOS | `~/Applications/Tsukimi.app/Contents/MacOS/tsukimi --uninstall` (add `--delete-data` to remove the library, downloads and cache too), or drag Tsukimi from ~/Applications to the Bin. |
 | Linux | `~/.local/share/tsukimi/tsukimi --uninstall` (add `--delete-data` to remove the library, downloads and cache too). |
 
 | Option | |
 |---|---|
 | `--version` | print the version and quit |
-| `--here` | Linux: run where the program is instead of installing it |
-| `--uninstall` [`--delete-data`] | Linux: remove the program and its menu entries (and the data); macOS: explains what to remove |
+| `--here` | Linux / macOS: run where the program is instead of installing it |
+| `--uninstall` [`--delete-data`] | Linux / macOS: remove the program and its menu entries / app (and the data) |
 
 ## 💾 Downloads
 
@@ -235,8 +235,7 @@ GitHub's Windows, Linux and macOS runners, create the tag `vX.Y.Z` and publish t
 |---|---|
 | `Tsukimi-setup.exe` | Windows setup wizard; also what an update runs |
 | `tsukimi-linux-x64` | the Linux program; also what an update downloads |
-| `tsukimi-macos-arm64` | the macOS program; what an update downloads |
-| `Tsukimi-macos-arm64.dmg` | Tsukimi.app for a first install on a Mac |
+| `tsukimi-macos-arm64` | the macOS program (installs itself as ~/Applications/Tsukimi.app); also what an update downloads |
 | `SHA256SUMS.txt` | checksums of all of the above |
 
 The release notes are the version's section of the changelog. The **CI** workflow checks every push and pull request on

@@ -44,7 +44,7 @@ crates/tsukimi-core/       all logic, no UI dependency
 app/                       Tauri shell (package + binary `tsukimi`)
   src/main.rs              tauri commands → Tsukimi methods; probe events; single instance; --version
   src/install.rs           Linux self-install (~/.local/share/tsukimi + .desktop), --here, --uninstall
-  tauri.conf.json          window, CSP, icons (bundle inactive: releases use Inno Setup / plain binaries / a dmg)
+  tauri.conf.json          window, CSP, icons (bundle inactive: releases use Inno Setup / plain binaries)
   installer/               tsukimi.iss (Windows setup = update), Info.plist (macOS app), wizard-*.bmp
   capabilities/default.json
   ui/                      index.html, app.css, app.js (plain ES module), vendor/hls.min.js
@@ -79,7 +79,8 @@ On Windows git may not be on PATH: GitHub Desktop's copy is under `%LOCALAPPDATA
   on that commit). The release body is that version's CHANGELOG section (`scripts/release-notes.ps1` fails on an empty
   one). The workflow never pushes commits.
 - One file per system, the same file installs and updates: `Tsukimi-setup.exe`, `tsukimi-linux-x64`,
-  `tsukimi-macos-arm64` (+ `Tsukimi-macos-arm64.dmg` for the first install) and `SHA256SUMS.txt`. Renaming any of them
+  `tsukimi-macos-arm64` (exactly three programs) and `SHA256SUMS.txt`. Linux and macOS install themselves on first start
+  (`install.rs`: ~/.local/share/tsukimi, ~/Applications/Tsukimi.app). Renaming any of them
   breaks updates of installed copies (`updater::asset_name`).
 - The setup's `AppId` GUID in `tsukimi.iss` must never change. The setup removes an old dango NSIS install (program,
   shortcuts, uninstall key) but never its data: the app migrates that (`migrate.rs`).

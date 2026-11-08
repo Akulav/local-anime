@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- Tsukimi.app in the macOS disk image (release.yml fills in @VERSION@). The program inside keeps its data in
+<!-- Tsukimi.app's Info.plist. The macOS program embeds this file and writes it (with @VERSION@ filled in) when it
+     installs itself as ~/Applications/Tsukimi.app (app/src/install.rs). Its data lives in
      ~/Library/Application Support/dev.akulav.Tsukimi; an update replaces Contents/MacOS/tsukimi and re-signs the
      app ad hoc (crates/tsukimi-core/src/updater.rs). -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

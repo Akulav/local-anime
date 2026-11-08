@@ -22,7 +22,7 @@ if (-not $content) { throw "CHANGELOG.md section for $Version is empty - describ
 $body += "`n`n---`n" +
     "| System | Download | |`n|---|---|---|`n" +
     "| **Windows** 10/11 x64 | ``Tsukimi-setup.exe`` | setup wizard, per user, no admin rights |`n" +
-    "| **macOS** Apple Silicon | ``Tsukimi-macos-arm64.dmg`` | drag Tsukimi to Applications |`n" +
+    "| **macOS** Apple Silicon | ``tsukimi-macos-arm64`` | ``chmod +x tsukimi-macos-arm64`` and run it: it installs itself (~/Applications) |`n" +
     "| **Linux** x64 | ``tsukimi-linux-x64`` | ``chmod +x tsukimi-linux-x64`` and run it: it installs itself (app menu) |`n`n" +
     "Already have Tsukimi? Use **Update** in the app (sidebar or Settings). Every file is listed in ``SHA256SUMS.txt``.`n" +
     "Coming from dango? Install Tsukimi over it: your library, progress and downloads move over on the first start.`n`n" +

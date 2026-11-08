@@ -5,12 +5,16 @@
 //!   desktop shortcut when there is a desktop folder) and starts that copy. `--here` runs where it is
 //!   instead, `--uninstall` removes the program and its entries (the library, settings and downloads
 //!   only with `--delete-data`).
-//! - macOS: the disk image's Tsukimi.app is the install (drag it to Applications); nothing to do here.
-//!   `--uninstall` explains what to remove.
+//! - macOS: the release file `tsukimi-macos-arm64` is the whole program too. Started from anywhere it
+//!   builds ~/Applications/Tsukimi.app around a copy of itself (Info.plist, icon, ad-hoc signature)
+//!   and opens that. `--here` runs where it is; `--uninstall [--delete-data]` removes the app.
+//!
+//! So a release has three programs, one per system, and each both installs and updates
+//! (Windows: `Tsukimi-setup.exe`, see updater.rs).
 //!
 //! A program built on this computer (cargo / tauri: …/target/…) always runs in place.
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::path::{Path, PathBuf};
 
 /// Returns true when this process should go on and start Tsukimi, false when it has done its job.
@@ -60,8 +64,70 @@ pub fn first_run() -> bool {
             }
         }
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        if has("--here") {
+            return true;
+        }
+        let Ok(exe) = std::env::current_exe() else { return true };
+        if tsukimi_core::updater::self_built(&exe) || tsukimi_core::updater::app_bundle(&exe).is_some() {
+            return true; // built here, or already running inside an .app
+        }
+        let Some(app) = mac_app_dir() else { return true };
+        match mac_install(&exe, &app) {
+            Ok(()) => match std::process::Command::new("/usr/bin/open").arg(&app).spawn() {
+                Ok(_) => {
+                    println!("Tsukimi is installed as {}.", app.display());
+                    false
+                }
+                Err(e) => {
+                    eprintln!("Tsukimi: installed, but could not open {}: {e}. Running from here.", app.display());
+                    true
+                }
+            },
+            Err(e) => {
+                eprintln!("Tsukimi: could not install into {} ({e}). Running from here.", app.display());
+                true
+            }
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     true
+}
+
+/// ~/Applications/Tsukimi.app (a per-user Applications folder: no administrator password).
+#[cfg(target_os = "macos")]
+fn mac_app_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Applications").join("Tsukimi.app"))
+}
+
+/// Builds (or refreshes) the app bundle around a copy of this program, unless a newer one is there.
+#[cfg(target_os = "macos")]
+fn mac_install(exe: &Path, app: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    const ICNS: &[u8] = include_bytes!("../icons/icon.icns");
+    const PLIST: &str = include_str!("../installer/Info.plist");
+    let macos = app.join("Contents").join("MacOS");
+    let res = app.join("Contents").join("Resources");
+    std::fs::create_dir_all(&macos)?;
+    std::fs::create_dir_all(&res)?;
+    let bin = macos.join("tsukimi");
+    let mine = tsukimi_core::VERSION;
+    let keep_installed = installed_version(&bin).is_some_and(|v| !tsukimi_core::updater::newer(mine, &v));
+    if !keep_installed {
+        let tmp = bin.with_extension("new");
+        std::fs::copy(exe, &tmp)?;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))?;
+        std::fs::rename(&tmp, &bin)?;
+        std::fs::write(res.join("icon.icns"), ICNS)?;
+        std::fs::write(app.join("Contents").join("Info.plist"), PLIST.replace("@VERSION@", mine))?;
+        // ad hoc: no certificate; macOS asks once on the first open (right-click → Open)
+        let _ = std::process::Command::new("/usr/bin/codesign")
+            .args(["--force", "--deep", "--sign", "-"])
+            .arg(app)
+            .status();
+    }
+    Ok(())
 }
 
 /// ~/.local/share/tsukimi (`$XDG_DATA_HOME/tsukimi`), which is also where the library lives.
@@ -88,7 +154,7 @@ fn same_file(a: &Path, b: &Path) -> bool {
 }
 
 /// The version an installed program reports (`tsukimi --version` → "Tsukimi 4.1.0 (made by Akulav)").
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn installed_version(target: &Path) -> Option<String> {
     let out = std::process::Command::new(target).arg("--version").output().ok()?;
     String::from_utf8_lossy(&out.stdout).split_whitespace().nth(1).map(String::from)
@@ -190,12 +256,21 @@ fn uninstall(delete_data: bool) {
     }
     #[cfg(target_os = "macos")]
     {
-        let data = tsukimi_core::Paths::resolve().map(|p| p.data.display().to_string()).unwrap_or_default();
-        if delete_data && !data.is_empty() {
-            let _ = std::fs::remove_dir_all(&data);
-            println!("Tsukimi's data was removed from {data}.");
+        if let Some(app) = mac_app_dir().filter(|a| a.exists()) {
+            let _ = std::fs::remove_dir_all(&app);
+            println!("Removed {}.", app.display());
         }
-        println!("Drag Tsukimi from Applications to the Bin to remove the app. Its data is in {data}.");
+        if delete_data {
+            if let Ok(p) = tsukimi_core::Paths::resolve() {
+                for d in [&p.data, &p.cache, &p.downloads] {
+                    let _ = std::fs::remove_dir_all(d);
+                }
+                println!("Tsukimi's library, settings, downloads and cache were removed.");
+            }
+        } else {
+            let data = tsukimi_core::Paths::resolve().map(|p| p.data.display().to_string()).unwrap_or_default();
+            println!("Your library, settings and downloads stay in {data} (add --delete-data to remove them).");
+        }
     }
     #[cfg(windows)]
     {
