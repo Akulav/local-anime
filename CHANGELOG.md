@@ -7,13 +7,15 @@ pushed to `main`, GitHub Actions tags, builds and publishes the release.
 
 ## [Unreleased]
 
-## [4.1.1] - 2026-11-07
+## [4.1.2] - 2026-11-08
 
 ### Changed
 - **Exactly three programs per release, one per system, each both installs and updates:** `Tsukimi-setup.exe`,
   `tsukimi-linux-x64` and `tsukimi-macos-arm64` (plus `SHA256SUMS.txt`). The macOS disk image is gone: the macOS
   program installs itself as `~/Applications/Tsukimi.app` on its first start (icon, Info.plist, ad-hoc signature),
   like the Linux one does; `--here` runs it in place, `--uninstall [--delete-data]` removes it.
+
+## [4.1.1] - 2026-11-07
 
 ### Fixed
 - **Crash while searching** (the window just vanished, nothing in the logs): two source checks running on the same
