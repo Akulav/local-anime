@@ -207,3 +207,12 @@ Upstream headers: the spec's referer/origin/ua/cookie, then the registry proxy r
   (`data-key` = camelCase field name).
 - **New host capability for providers:** a function on `__host` in `js.rs::install_host`, exposed through `prelude.js`.
 - **A change worth a release:** a line under `[Unreleased]` in `CHANGELOG.md`, then `scripts/bump-version.ps1`.
+
+## graphify
+
+This project has a knowledge graph at graphify-out/ with god nodes, community structure, and cross-file relationships. It is local only (`graphify-out/` is git-ignored).
+
+Rules:
+- When graphify-out/graph.json exists, run `graphify query "<question>"` before your first grep, search or source-file read for a codebase question, and put this rule in every subagent prompt that explores code. Read raw files only for lines the graph or an earlier read already located. Use `graphify path "<A>" "<B>"` for relationships and `graphify explain "<concept>"` for focused concepts.
+- Read graphify-out/GRAPH_REPORT.md only for broad architecture review or when query/path/explain do not surface enough context.
+- After modifying code, run `graphify update .` to keep the graph current (AST-only, no API cost). If graphify-out/ is missing, rebuild it the same way.

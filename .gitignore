@@ -10,3 +10,5 @@
 # Local data when running in portable mode
 /data
 portable
+# graphify knowledge graph (local, rebuilt with `graphify update .`)
+graphify-out/
