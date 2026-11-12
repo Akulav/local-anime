@@ -784,7 +784,7 @@ function aboutView() {
         <dt>Metadata &amp; artwork</dt><dd>${link('https://anilist.co', 'AniList')}</dd>
         <dt>Intro &amp; outro times</dt><dd>${link('https://aniskip.com', 'AniSkip')}</dd>
         <dt>Built with</dt><dd>Rust, Tauri, QuickJS (rquickjs), hls.js, cheerio</dd>
-        <dt>License</dt><dd>MIT. Original work © 2025 serifpersia, this version © 2026 Akulav.</dd>
+        <dt>License</dt><dd>Akulav Source-Available License. Original dango © 2025 serifpersia (MIT), this version © 2026 Akulav.</dd>
       </dl>
     </div>
     <div class="panel credits"><h3>Note</h3><p>Tsukimi doesn't host any video. It plays streams that the providers in the registry find on third-party sites.</p></div>

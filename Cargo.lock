@@ -4920,9 +4920,10 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "tsukimi"
-version = "4.1.3"
+version = "4.2.0"
 dependencies = [
  "anyhow",
+ "directories",
  "serde",
  "serde_json",
  "tauri",
@@ -4936,7 +4937,7 @@ dependencies = [
 
 [[package]]
 name = "tsukimi-core"
-version = "4.1.3"
+version = "4.2.0"
 dependencies = [
  "aes",
  "anyhow",

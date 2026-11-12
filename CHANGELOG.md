@@ -7,6 +7,23 @@ pushed to `main`, GitHub Actions tags, builds and publishes the release.
 
 ## [Unreleased]
 
+## [4.2.0] - 2026-11-12
+
+### Changed
+- **Everything lives in the folder you install Tsukimi to**: your library, settings, logs, stream cache, downloaded
+  episodes and the window's own browser data go to `data/` next to the program, never to `%APPDATA%`,
+  `~/.local/share` or `~/.cache`. Install on `D:\` and your downloads go to `D:\` too. Data from 4.1 and older (and
+  from dango) is moved in on the first start, also when the install folder is on another drive.
+- Linux and macOS: the first start asks where to install with the system's folder picker (default
+  `~/.local/share/tsukimi` or `~/Applications/Tsukimi`; `--install-dir <folder>` skips the question). The folder is
+  remembered, so a newer download updates that copy. An existing install is picked up automatically; on macOS
+  `~/Applications/Tsukimi.app` moves into `~/Applications/Tsukimi/`.
+- Windows: the setup notes that everything is stored in the chosen folder, and the uninstaller offers to delete
+  `data\` (default: keep).
+- The license is now the Akulav Source-Available License, like the other Akulav apps. serifpersia's original MIT
+  notice for dango is kept in `LICENSE`.
+- New README in the same style as the other Akulav apps.
+
 ## [4.1.3] - 2026-11-09
 
 ### Fixed

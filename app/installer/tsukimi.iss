@@ -10,7 +10,7 @@
 ;   Tsukimi-setup.exe /SILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS /LAUNCH=1 /DIR=<folder> /LOG=<file>
 ;
 ; Before installing, an existing install is uninstalled silently (program, shortcuts, Apps entry -
-; the library, settings and downloads in %APPDATA% / %LOCALAPPDATA%\akulav\Tsukimi stay; only an
+; the library, settings and downloads in the install folder's data\ stay; only an
 ; uninstall where you answer "yes" deletes them), then the new version is installed and, with
 ; /LAUNCH=1, started. An install of dango (the app's previous name, Tauri's NSIS setup) is removed
 ; the same way; Tsukimi moves dango's library and downloads over on its first start.
@@ -77,7 +77,8 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [CustomMessages]
 AppComment=Fast desktop anime player - made by Akulav
-DeleteData=Tsukimi is uninstalled.%n%nAlso delete your library, watch progress, settings and downloaded episodes?%n%n%1%n%2%n%nNo keeps them: installing Tsukimi again brings everything back.
+DeleteData=Tsukimi is uninstalled.%n%nAlso delete your library, watch progress, settings and downloaded episodes?%n%n%1%n%nNo keeps them: installing Tsukimi again brings everything back.
+DataNote=Tsukimi and everything it keeps (library, settings, cache and downloaded episodes) will be stored in this folder.
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
@@ -97,6 +98,8 @@ Filename: "{app}\tsukimi.exe"; Parameters: "--after-update"; WorkingDir: "{app}"
 
 [UninstallDelete]
 Type: files; Name: "{app}\tsukimi.exe.old"
+; marks the install folder; the app keeps its data in {app}\data (crates/tsukimi-core/src/lib.rs)
+Type: files; Name: "{app}\.tsukimi-install"
 
 [Code]
 const
@@ -170,23 +173,38 @@ begin
   RemoveDango();
 end;
 
+procedure InitializeWizard();
+begin
+  WizardForm.SelectDirLabel.Caption := WizardForm.SelectDirLabel.Caption + #13#10 + CustomMessage('DataNote');
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssPostInstall then
+    SaveStringToFile(ExpandConstant('{app}\.tsukimi-install'), '{#AppVersion}', False);
+end;
+
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var
-  Roaming, Local: String;
+  Data, Roaming, Local: String;
 begin
   if CurUninstallStep = usUninstall then
     StopRunning(ExpandConstant('{app}'));
   if (CurUninstallStep = usPostUninstall) and not UninstallSilent then
   begin
+    Data := ExpandConstant('{app}\data');
+    // (versions before 4.2 kept the data in these per-user folders)
     Roaming := ExpandConstant('{userappdata}\akulav\Tsukimi');
     Local := ExpandConstant('{localappdata}\akulav\Tsukimi');
-    if (DirExists(Roaming) or DirExists(Local)) and
-       (MsgBox(FmtMessage(CustomMessage('DeleteData'), [Roaming, Local]), mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES) then
+    if (DirExists(Data) or DirExists(Roaming) or DirExists(Local)) and
+       (MsgBox(FmtMessage(CustomMessage('DeleteData'), [Data]), mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES) then
     begin
+      DelTree(Data, True, True, True);
       DelTree(Roaming, True, True, True);
       DelTree(Local, True, True, True);
       RemoveDir(ExpandConstant('{userappdata}\akulav'));
       RemoveDir(ExpandConstant('{localappdata}\akulav'));
     end;
+    RemoveDir(ExpandConstant('{app}'));
   end;
 end;

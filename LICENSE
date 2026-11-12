@@ -1,22 +1,105 @@
-MIT License
+Akulav Source-Available License 1.0
 
-Copyright (c) 2025 serifpersia (original dango, https://github.com/serifpersia/dango)
-Copyright (c) 2026 Akulav (Rust rewrite)
+Copyright (c) 2026 Akulav. All rights reserved.
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+This license covers the source code, documentation, release builds and other
+materials in this repository (the "Software"). The Software is source-available,
+not open source. By using it, you agree to these terms.
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+1. WHAT YOU MAY DO
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+   a. Use releases. You may download, install and run official release builds
+      of the Software, and builds you make yourself, for any purpose and on any
+      number of devices, as long as you do not break section 2.
+
+   b. View. You may view, read and study all of the Software.
+
+   c. Modify privately. You may make private copies and private forks of the
+      Software and change them for your own use.
+
+   d. Share with friends and family. You may share your modified versions
+      privately, free of charge, with a small group of friends or members of
+      your family. They receive them under this same license and must follow
+      these terms too. Sharing must stay private: no public uploads, public
+      repositories, public links, stores or mirrors.
+
+   e. Contribute back. You may fork this repository on GitHub only to send
+      changes back to it as pull requests or patches.
+
+2. WHAT YOU MAY NOT DO
+
+   a. Distribute modifications. You may not publish, share or distribute
+      modified versions of the Software, or any work based on it, in any form,
+      except as allowed in section 1(d) and 1(e).
+
+   b. Redistribute. You may not redistribute the Software, modified or not, in
+      any form: no re-uploads, mirrors, bundles, repackaged installers, app
+      stores or hosting it for others. Linking to this repository or its
+      official releases is fine.
+
+   c. Make money. You may not sell, rent, sublicense or charge for the
+      Software or any modified version of it; offer it, or any part of it, as
+      a paid product or service; or use it to earn money in any other way,
+      including advertising, donations or paid access tied to it. Using the
+      Software as a tool for your own personal tasks does not count as making
+      money from it.
+
+   d. Remove notices. You may not remove or change this license or the
+      copyright notices in the Software.
+
+3. THIRD-PARTY PARTS
+
+   Third-party libraries, fonts, models, data and other components included
+   with or downloaded by the Software keep their own licenses. This license
+   does not change those terms.
+
+4. TERMINATION
+
+   If you break these terms, your rights under this license end automatically.
+   You must then stop using the Software and delete every copy you have,
+   including modified versions.
+
+5. OTHER PERMISSIONS
+
+   Anything not allowed above needs written permission from the copyright
+   holder. Ask by opening an issue in this repository.
+
+6. NO WARRANTY
+
+   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+   IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+   FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+   AUTHOR OR COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+   LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+   FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+   DEALINGS IN THE SOFTWARE.
+
+7. ORIGINAL DANGO NOTICE
+
+   Tsukimi is a Rust rewrite inspired by dango by serifpersia
+   (https://github.com/serifpersia/dango). Parts derived from dango, and the
+   versions of this repository published before 4.2.0, remain available under
+   the MIT License below. This notice is kept as that license requires.
+
+   MIT License
+
+   Copyright (c) 2025 serifpersia (original dango, https://github.com/serifpersia/dango)
+   Copyright (c) 2026 Akulav (Rust rewrite, versions before 4.2.0)
+
+   Permission is hereby granted, free of charge, to any person obtaining a copy
+   of this software and associated documentation files (the "Software"), to deal
+   in the Software without restriction, including without limitation the rights
+   to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+   copies of the Software, and to permit persons to whom the Software is
+   furnished to do so, subject to the following conditions:
+
+   The above copyright notice and this permission notice shall be included in all
+   copies or substantial portions of the Software.
+
+   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+   IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+   FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+   AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+   LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+   OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+   SOFTWARE.

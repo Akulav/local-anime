@@ -52,28 +52,59 @@ impl Paths {
         Self { cache: d.join("cache"), downloads: d.join("downloads"), data: d }
     }
 
-    /// `TSUKIMI_DATA_DIR`, then a `data/` folder next to the executable when a `portable` marker
-    /// file exists there, then the OS-standard locations (moved over from dango's on first start).
+    /// `TSUKIMI_DATA_DIR`, else the `data/` folder in the folder Tsukimi lives in: the install folder
+    /// the user chose (next to the program; on macOS next to `Tsukimi.app`), or next to a copy that
+    /// isn't installed. Never the OS's per-user app-data folders. Pure: [`Paths::migrate_legacy`]
+    /// brings older data in.
     pub fn resolve() -> Result<Self> {
         if let Ok(d) = std::env::var("TSUKIMI_DATA_DIR") {
             return Ok(Self::under(d));
         }
-        if let Some(dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf)) {
-            if dir.join("portable").exists() {
-                return Ok(Self::under(dir.join("data")));
-            }
-        }
-        let pd = directories::ProjectDirs::from("dev", "akulav", "Tsukimi").context("no home directory")?;
-        let p = Self {
-            data: pd.data_dir().to_path_buf(),
-            cache: pd.cache_dir().to_path_buf(),
-            downloads: pd.data_local_dir().join("downloads"),
-        };
-        if let Some(old) = directories::ProjectDirs::from("dev", "dango", "dango") {
-            migrate::from_dango(&p, old.data_dir(), old.cache_dir());
-        }
-        Ok(p)
+        let root = program_root().context("unknown program folder")?;
+        Ok(Self::under(root.join("data")))
     }
+
+    /// On the start of an installed copy: data from versions before 4.2 (the OS's per-user folders)
+    /// and from dango moves into the install folder, across drives too. Best effort.
+    pub fn migrate_legacy(&self) {
+        if std::env::var_os("TSUKIMI_DATA_DIR").is_some() || !program_root().is_some_and(|r| is_install_root(&r)) {
+            return;
+        }
+        if let Some(pd) = directories::ProjectDirs::from("dev", "akulav", "Tsukimi") {
+            migrate::from_os_folders(self, pd.data_dir(), pd.cache_dir(), &pd.data_local_dir().join("downloads"));
+        }
+        if let Some(old) = directories::ProjectDirs::from("dev", "dango", "dango") {
+            migrate::from_dango(self, old.data_dir(), old.cache_dir());
+        }
+    }
+}
+
+/// Present in every install folder (written by the setup and by the Linux/macOS self-install).
+pub const INSTALL_MARKER: &str = ".tsukimi-install";
+
+/// Folder a program belongs to: its own folder, or for `X.app/Contents/MacOS/bin` the folder that
+/// holds `X.app`.
+pub fn root_of_exe(exe: &Path) -> Option<PathBuf> {
+    let dir = exe.parent()?;
+    let bundle = dir
+        .parent()
+        .filter(|_| dir.file_name().is_some_and(|n| n == "MacOS"))
+        .filter(|contents| contents.file_name().is_some_and(|n| n == "Contents"))
+        .and_then(Path::parent)
+        .filter(|b| b.extension().is_some_and(|e| e == "app"));
+    match bundle {
+        Some(b) => b.parent().map(Path::to_path_buf),
+        None => Some(dir.to_path_buf()),
+    }
+}
+
+/// The folder of the running program (see [`root_of_exe`]).
+pub fn program_root() -> Option<PathBuf> {
+    std::env::current_exe().ok().and_then(|e| root_of_exe(&e))
+}
+
+pub fn is_install_root(dir: &Path) -> bool {
+    dir.join(INSTALL_MARKER).is_file()
 }
 
 pub struct Tsukimi {

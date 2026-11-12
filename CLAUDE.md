@@ -44,7 +44,7 @@ crates/tsukimi-core/       all logic, no UI dependency
   examples/stress_app.rs   minutes of parallel search/probe/streams: catches heap corruption (prints "survived")
 app/                       Tauri shell (package + binary `tsukimi`)
   src/main.rs              tauri commands → Tsukimi methods; probe events; single instance; --version
-  src/install.rs           Linux self-install (~/.local/share/tsukimi + .desktop), --here, --uninstall
+  src/install.rs           Linux/macOS self-install into a folder the user picks (zenity/kdialog/osascript), --here, --install-dir, --uninstall
   tauri.conf.json          window, CSP, icons (bundle inactive: releases use Inno Setup / plain binaries)
   installer/               tsukimi.iss (Windows setup = update), Info.plist (macOS app), wizard-*.bmp
   capabilities/default.json
@@ -70,7 +70,7 @@ cd tools/js-vendor && npm install && node build.mjs    # regenerate vendor.js + 
 ```
 
 `RUST_LOG=debug` enables verbose logs (provider console output appears at trace/debug).
-`TSUKIMI_DATA_DIR=<dir>` puts data, cache and downloads under one folder. A `portable` file next to the exe uses `./data`.
+**All data lives in the install folder** (`Paths::resolve`: `<program folder>/data`, on macOS next to Tsukimi.app; owner's rule, like akulav-mc-launcher): library, settings, logs, cache, downloads and the webview's data (`data/webview`, set on the window in `main.rs`; macOS WKWebView can't be moved). `Paths::migrate_legacy` moves pre-4.2 data from the OS per-user folders (and dango's) into an installed copy's folder (marker `.tsukimi-install`, written by the setup / self-install). `TSUKIMI_DATA_DIR=<dir>` overrides.
 On Windows git may not be on PATH: GitHub Desktop's copy is under `%LOCALAPPDATA%\GitHubDesktop\app-*\resources\app\git\cmd`.
 
 ## Releases and updates
@@ -81,7 +81,8 @@ On Windows git may not be on PATH: GitHub Desktop's copy is under `%LOCALAPPDATA
   one). The workflow never pushes commits.
 - One file per system, the same file installs and updates: `Tsukimi-setup.exe`, `tsukimi-linux-x64`,
   `tsukimi-macos-arm64` (exactly three programs) and `SHA256SUMS.txt`. Linux and macOS install themselves on first start
-  (`install.rs`: ~/.local/share/tsukimi, ~/Applications/Tsukimi.app). Renaming any of them
+  (`install.rs`: into a folder the user picks, default ~/.local/share/tsukimi or ~/Applications/Tsukimi/Tsukimi.app;
+  remembered in `<config>/tsukimi/install-dir`). Renaming any of them
   breaks updates of installed copies (`updater::asset_name`).
 - The setup's `AppId` GUID in `tsukimi.iss` must never change. The setup removes an old dango NSIS install (program,
   shortcuts, uninstall key) but never its data: the app migrates that (`migrate.rs`).

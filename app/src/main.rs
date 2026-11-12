@@ -272,6 +272,10 @@ fn main() {
     if !install::first_run() {
         return;
     }
+    // Before logging opens its file: older data (OS per-user folders, dango) moves into the install folder.
+    if let Ok(p) = Paths::resolve() {
+        p.migrate_legacy();
+    }
     match Paths::resolve() {
         Ok(p) => tsukimi_core::init_logging_to(Some(&p.data.join("tsukimi.log"))),
         Err(_) => tsukimi_core::init_logging(),
@@ -285,6 +289,14 @@ fn main() {
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let paths = Paths::resolve()?;
+            // The window is created here (not from tauri.conf.json) so the webview keeps its own data
+            // (cache, local storage) in Tsukimi's folder too, not in the OS's app-data folder.
+            // (macOS's WKWebView always uses ~/Library/WebKit.)
+            if let Some(cfg) = app.config().app.windows.iter().find(|w| w.label == "main").cloned() {
+                tauri::WebviewWindowBuilder::from_config(app.handle(), &cfg)?
+                    .data_directory(paths.data.join("webview"))
+                    .build()?;
+            }
             let core = tauri::async_runtime::block_on(Tsukimi::start(paths))?;
             // Forward live source-probe updates to the UI.
             let mut rx = core.subscribe_probes();

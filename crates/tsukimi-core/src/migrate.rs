@@ -6,6 +6,65 @@ use std::path::Path;
 
 use crate::Paths;
 
+/// Tsukimi before 4.2 kept its data in the OS's per-user folders: move the database, logs, provider
+/// modules, cache and downloads into the install folder's `data/`. Only Tsukimi's own entries move
+/// (on Linux the old data folder was also the install folder, so the program sits there too), and
+/// nothing that already exists at the destination is overwritten.
+pub(crate) fn from_os_folders(new: &Paths, old_data: &Path, old_cache: &Path, old_downloads: &Path) {
+    let same = |a: &Path, b: &Path| match (a.canonicalize(), b.canonicalize()) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => false,
+    };
+    let move_one = |from: &Path, to: &Path| {
+        if !from.exists() || to.exists() || same(from, to) || to.starts_with(from) {
+            return;
+        }
+        let r = if from.is_dir() { move_dir(from, to) } else { move_file(from, to) };
+        match r {
+            Ok(()) => tracing::info!("moved {} to {}", from.display(), to.display()),
+            Err(e) => tracing::warn!("could not move {} to {}: {e}", from.display(), to.display()),
+        }
+    };
+    if let Ok(rd) = std::fs::read_dir(old_data) {
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            let ours = name.starts_with("tsukimi.db")
+                || name.starts_with("tsukimi.log")
+                || name == "crash.log"
+                || name == "remote-providers";
+            if ours {
+                move_one(&e.path(), &new.data.join(&name));
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(old_data.join("updates"));
+    move_one(old_downloads, &new.downloads);
+    move_one(old_cache, &new.cache);
+    // The webview's own data (Tauri's default `<local data>/com.akulav.tsukimi`).
+    if let Some(d) = directories::BaseDirs::new() {
+        move_one(&d.data_local_dir().join("com.akulav.tsukimi"), &new.data.join("webview"));
+    }
+    // Empty leftovers (`akulav\Tsukimi\data`, …), never anything with files in it.
+    for dir in [old_downloads, old_data, old_cache] {
+        for p in dir.ancestors().take(3) {
+            if std::fs::remove_dir(p).is_err() {
+                break;
+            }
+        }
+    }
+}
+
+fn move_file(from: &Path, to: &Path) -> std::io::Result<()> {
+    if let Some(p) = to.parent() {
+        std::fs::create_dir_all(p)?;
+    }
+    if std::fs::rename(from, to).is_ok() {
+        return Ok(());
+    }
+    std::fs::copy(from, to)?;
+    std::fs::remove_file(from)
+}
+
 /// Moves dango's data and cache folders to Tsukimi's, when Tsukimi has none yet.
 pub(crate) fn from_dango(new: &Paths, old_data: &Path, old_cache: &Path) {
     for (old, new) in [(old_data, new.data.as_path()), (old_cache, new.cache.as_path())] {

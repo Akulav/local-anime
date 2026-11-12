@@ -10,6 +10,7 @@
     "windows": [
       {
         "label": "main",
+        "create": false,
         "title": "Tsukimi",
         "width": 1360,
         "height": 860,
@@ -29,7 +30,7 @@
     "active": false,
     "category": "Video",
     "publisher": "Akulav",
-    "copyright": "Made by Akulav, inspired by dango by serifpersia. MIT License.",
+    "copyright": "Made by Akulav, inspired by dango by serifpersia. Akulav Source-Available License.",
     "shortDescription": "Tsukimi - fast desktop anime player",
     "longDescription": "Tsukimi finds working anime sources automatically, streams through a local disk cache and keeps downloaded episodes for good. Made by Akulav, inspired by dango by serifpersia. Anime sources available on the dango provider registry.",
     "homepage": "https://github.com/Akulav/local-anime",
